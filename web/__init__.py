@@ -65,10 +65,12 @@ from cli.model import (
 
 
 app = Flask(__name__, root_path=ROOT_DIR, static_folder="static", template_folder="static")
-# secret_key is required for session cookies and flash() to function.
-# Use FLASK_SECRET_KEY env var for persistence across restarts; fall back to random.
-app.secret_key = os.getenv("FLASK_SECRET_KEY") or token(24)
 app.config.from_prefixed_env()
+# secret_key is required for session cookies and flash() to function.
+# Run after from_prefixed_env() so env var wins; fall back to a random token
+# if FLASK_SECRET_KEY is absent or set to an empty string.
+if not app.secret_key:
+    app.secret_key = token(24)
 app.svc = ServiceManager()
 
 # Configurable upload size limit (default: 2 GB)
@@ -82,6 +84,11 @@ app.config['SESSION_COOKIE_HTTPONLY'] = True
 sock = Sock(app)
 
 PRINTERS_WITHOUT_CAMERA = ["V8110"]
+
+# Devices that must never be controlled — not 3D printers (e.g. UV printers).
+# When the active printer matches one of these model codes, all services are
+# suppressed and printer-control API endpoints return 503.
+UNSUPPORTED_PRINTERS = ["V8260"]
 
 
 def _deep_update(base, updates):
@@ -124,8 +131,22 @@ def mqtt(sock):
     """
     Handles receiving and sending messages on the 'mqttqueue' stream service through websocket
     """
-    if not app.config["login"]:
+    if not app.config["login"] or app.config.get("unsupported_device"):
         return
+
+    # before_request middleware does not run for WebSocket routes, so enforce
+    # API key auth inline here.
+    api_key = app.config.get("api_key")
+    if api_key:
+        authed = (
+            session.get("authenticated")
+            or request.headers.get("X-Api-Key") == api_key
+            or request.args.get("apikey") == api_key
+        )
+        if not authed:
+            log.warning("WebSocket /ws/mqtt rejected: missing or invalid API key")
+            return
+
     for data in app.svc.stream("mqttqueue"):
         log.debug(f"MQTT message: {data}")
         sock.send(json.dumps(data))
@@ -136,8 +157,22 @@ def video(sock):
     """
     Handles receiving and sending messages on the 'videoqueue' stream service through websocket
     """
-    if not app.config["login"] or not app.config.get("video_supported"):
+    if not app.config["login"] or not app.config.get("video_supported") or app.config.get("unsupported_device"):
         return
+
+    # before_request middleware does not run for WebSocket routes, so enforce
+    # API key auth inline here.
+    api_key = app.config.get("api_key")
+    if api_key:
+        authed = (
+            session.get("authenticated")
+            or request.headers.get("X-Api-Key") == api_key
+            or request.args.get("apikey") == api_key
+        )
+        if not authed:
+            log.warning("WebSocket /ws/video rejected: missing or invalid API key")
+            return
+
     vq = app.svc.svcs.get("videoqueue")
     if not vq or not getattr(vq, "video_enabled", False):
         return
@@ -148,37 +183,64 @@ def video(sock):
 @sock.route("/ws/pppp-state")
 def pppp_state(sock):
     """
-    Provides the status of the 'pppp' stream service through websocket
+    Provides the status of the 'pppp' stream service through websocket.
+
+    Uses a passive read of the service registry so this handler never holds
+    a PPPP ref and never starts the service on its own.  That way the phone
+    app can open its own PPPP session even while the web UI is open.
+
+    States emitted:
+      "dormant"      — service not running (video/timelapse not active)
+      "connected"    — service running and PPPP handshake complete
+      "disconnected" — service was connected but the connection was lost
     """
-    if not app.config["login"]:
+    if not app.config["login"] or app.config.get("unsupported_device"):
         log.info("Websocket connection rejected: no printer configured (use 'config import' or 'config login')")
         return
 
+    # before_request middleware does not run for WebSocket routes, so enforce
+    # API key auth inline here.
+    api_key = app.config.get("api_key")
+    if api_key:
+        authed = (
+            session.get("authenticated")
+            or request.headers.get("X-Api-Key") == api_key
+            or request.args.get("apikey") == api_key
+        )
+        if not authed:
+            log.warning("WebSocket /ws/pppp-state rejected: missing or invalid API key")
+            return
+
     log.info("Starting PPPP state websocket handler")
 
-    pppp = None
-    pppp_connected = False
+    last_status = None
     last_keepalive = 0.0
+    pppp_was_connected = False  # True once we see "connected"; resets on dormant
 
     try:
-        # Start PPPP service, but don't block the websocket waiting for it.
-        pppp = app.svc.get("pppp", ready=False)
-
         while True:
             now = time.time()
-            current_connected = bool(getattr(pppp, "connected", False))
 
-            if current_connected and not pppp_connected:
-                sock.send(json.dumps({"status": "connected"}))
-                pppp_connected = True
-                last_keepalive = now
-            elif pppp_connected and not current_connected:
-                sock.send(json.dumps({"status": "disconnected"}))
-                break
-            elif pppp_connected and now - last_keepalive >= 10.0:
-                # Keepalive to detect client disconnects.
-                sock.send(json.dumps({"status": "connected"}))
-                last_keepalive = now
+            # Passive read — no ref-count increment, never starts the service.
+            pppp = app.svc.svcs.get("pppp")
+
+            if pppp is not None and bool(getattr(pppp, "connected", False)):
+                current_status = "connected"
+                pppp_was_connected = True
+            elif pppp is not None and getattr(pppp, "wanted", False) and pppp_was_connected:
+                # Service is still wanted but lost its PPPP connection.
+                current_status = "disconnected"
+            else:
+                # Service not running or connecting for the first time → dormant.
+                current_status = "dormant"
+                if pppp is None or not getattr(pppp, "wanted", False):
+                    pppp_was_connected = False
+
+            if current_status != last_status or (current_status == "connected" and now - last_keepalive >= 10.0):
+                sock.send(json.dumps({"status": current_status}))
+                last_status = current_status
+                if current_status == "connected":
+                    last_keepalive = now
 
             time.sleep(1.0)
     except ConnectionClosed:
@@ -187,11 +249,7 @@ def pppp_state(sock):
         log.warning(f"Error in PPPP state websocket handler: {e}")
         log.info("Stack trace:", exc_info=True)
     finally:
-        if pppp is not None:
-            try:
-                app.svc.put("pppp")
-            except Exception:
-                pass
+        # No put() needed — we never called get().
         log.info("PPPP state websocket handler ending")
 
 
@@ -200,8 +258,22 @@ def upload(sock):
     """
     Provides upload progress updates through websocket
     """
-    if not app.config["login"]:
+    if not app.config["login"] or app.config.get("unsupported_device"):
         return
+
+    # before_request middleware does not run for WebSocket routes, so enforce
+    # API key auth inline here.
+    api_key = app.config.get("api_key")
+    if api_key:
+        authed = (
+            session.get("authenticated")
+            or request.headers.get("X-Api-Key") == api_key
+            or request.args.get("apikey") == api_key
+        )
+        if not authed:
+            log.warning("WebSocket /ws/upload rejected: missing or invalid API key")
+            return
+
     for data in app.svc.stream("filetransfer"):
         sock.send(json.dumps(data))
 
@@ -211,7 +283,7 @@ def ctrl(sock):
     """
     Handles controlling of light and video quality through websocket
     """
-    if not app.config["login"]:
+    if not app.config["login"] or app.config.get("unsupported_device"):
         return
 
     # before_request middleware does not run for WebSocket routes, so enforce
@@ -288,6 +360,20 @@ def video_download():
     """
     Handles the video streaming/downloading feature in the Flask app
     """
+    # Enforce API key auth when configured; timelapse client uses ?for_timelapse=1
+    # on the loopback interface and does not carry a session, so allow it only when
+    # the request comes from localhost.
+    api_key = app.config.get("api_key")
+    if api_key:
+        authed = (
+            session.get("authenticated")
+            or request.headers.get("X-Api-Key") == api_key
+            or request.args.get("apikey") == api_key
+        )
+        if not authed:
+            log.warning("/video rejected: missing or invalid API key")
+            return Response("Unauthorized", 401)
+
     for_timelapse = request.args.get("for_timelapse") == "1"
 
     def generate():
@@ -332,6 +418,7 @@ def app_root():
                     "name": p.name,
                     "sn": p.sn,
                     "model": p.model,
+                    "supported": p.model not in UNSUPPORTED_PRINTERS,
                 })
         else:
             anker_config = "No printers found, please load your login config..."
@@ -366,6 +453,7 @@ def app_root():
             printers=printers_list,
             active_printer_index=app.config["printer_index"],
             printer_index_locked=app.config.get("printer_index_locked", False),
+            unsupported_device=app.config.get("unsupported_device", False),
         )
 
 
@@ -389,6 +477,7 @@ def app_api_printers():
                     "sn": p.sn,
                     "model": p.model,
                     "ip_addr": p.ip_addr,
+                    "supported": p.model not in UNSUPPORTED_PRINTERS,
                 })
         return jsonify({
             "printers": printers,
@@ -412,6 +501,12 @@ def app_api_set_active_printer():
     with config.open() as cfg:
         if not cfg or new_index < 0 or new_index >= len(cfg.printers):
             return jsonify({"error": f"Printer index {new_index} out of range"}), 400
+
+        # Block switching to an unsupported device (e.g. eufyMake E1 UV printer)
+        if cfg.printers[new_index].model in UNSUPPORTED_PRINTERS:
+            return jsonify({
+                "error": f"Device {cfg.printers[new_index].model} is not supported by ankerctl"
+            }), 403
 
         # Block switch during active print
         try:
@@ -536,6 +631,21 @@ def app_api_ankerctl_server_reload():
             return web.util.flash_redirect(url_for('app_root'), "No printers found in config", "warning")
         if "_flashes" in session:
             session["_flashes"].clear()
+
+        # Detect unsupported active device and suppress services
+        printer_index = app.config.get("printer_index", 0)
+        active_model = cfg.printers[printer_index].model if printer_index < len(cfg.printers) else None
+        unsupported = active_model in UNSUPPORTED_PRINTERS
+        app.config["unsupported_device"] = unsupported
+        if unsupported:
+            log.warning(
+                f"Active device {active_model} is not supported by ankerctl — "
+                "stopping all services and suppressing restart."
+            )
+            for svc in app.svc.svcs.values():
+                svc.stop()
+            return web.util.flash_redirect(url_for('app_root'), "Ankerctl reloaded successfully", "success")
+
         if cfg and not app.svc.svcs:
             register_services(app)
 
@@ -767,6 +877,9 @@ def app_api_printer_gcode():
         return {"error": "Missing gcode"}, 400
 
     gcode = payload["gcode"]
+    if not isinstance(gcode, str):
+        return {"error": "gcode must be a string"}, 400
+
     lines = [line.strip() for line in gcode.split('\n') if line.strip()]
 
     with app.svc.borrow("mqttqueue") as mqtt:
@@ -938,6 +1051,12 @@ def app_api_snapshot():
         host = "127.0.0.1"
     port = os.getenv("FLASK_PORT") or "4470"
     url = f"http://{host}:{port}/video"
+    # Pass API key as query parameter so the internal /video call is authenticated
+    # when a key is configured.  The URL is loopback-only and never sent to clients.
+    snap_api_key = app.config.get("api_key")
+    if snap_api_key:
+        from urllib.parse import quote as _quote
+        url += f"?apikey={_quote(snap_api_key, safe='')}"
 
     temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
     temp_path = temp_file.name
@@ -990,6 +1109,9 @@ def app_api_history():
     """Return print history as JSON with pagination."""
     limit = request.args.get("limit", 50, type=int)
     offset = request.args.get("offset", 0, type=int)
+    # Clamp parameters to safe ranges to prevent excessive queries or errors
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
     with app.svc.borrow("mqttqueue") as mqtt:
         if not mqtt:
             return {"entries": [], "total": 0}
@@ -1132,8 +1254,20 @@ def webserver(config, printer_index, host, port, insecure=False, **kwargs):
         - None
     """
     # Filament profile store — initialized once at startup
-    config_root = str(config.config_root)
-    app.filaments = FilamentStore(db_path=f"{config_root}/filament.db")
+    config_root = config.config_root
+    app.filaments = FilamentStore(db_path=str(config_root / "filament.db"))
+
+    # Ensure a stable Flask secret key that survives container restarts.
+    # FLASK_SECRET_KEY env var takes precedence (set at import via from_prefixed_env).
+    # Without the env var, the import-time key is a random ephemeral token that
+    # changes on every restart.  Replace it with a value persisted in the config dir.
+    if not os.getenv("FLASK_SECRET_KEY"):
+        secret_key_path = config_root / "flask_secret.key"
+        if not secret_key_path.exists():
+            secret_key_path.write_text(token(24))
+            secret_key_path.chmod(0o600)
+        persisted = secret_key_path.read_text().strip()
+        app.secret_key = persisted or token(24)
 
     # Resolve API key: ENV var takes precedence over config file
     api_key = cli.config.resolve_api_key(config)
@@ -1157,8 +1291,11 @@ def webserver(config, printer_index, host, port, insecure=False, **kwargs):
         if cfg and printer_index >= len(cfg.printers):
             log.critical(f"Printer number {printer_index} out of range, max printer number is {len(cfg.printers)-1} ")
         video_supported = False
+        active_model = None
         if cfg and printer_index < len(cfg.printers):
-            video_supported = cfg.printers[printer_index].model not in PRINTERS_WITHOUT_CAMERA
+            active_model = cfg.printers[printer_index].model
+            video_supported = active_model not in PRINTERS_WITHOUT_CAMERA
+        unsupported = active_model in UNSUPPORTED_PRINTERS if active_model else False
         app.config["config"] = config
         app.config["login"] = bool(cfg)
         app.config["printer_index"] = printer_index
@@ -1166,9 +1303,15 @@ def webserver(config, printer_index, host, port, insecure=False, **kwargs):
         app.config["host"] = host
         app.config["insecure"] = insecure
         app.config["video_supported"] = video_supported
+        app.config["unsupported_device"] = unsupported
         app.config.update(kwargs)
-        if cfg:
+        if cfg and not unsupported:
             register_services(app)
+        elif cfg and unsupported:
+            log.warning(
+                f"Active device {active_model} is not supported by ankerctl — "
+                "printer-control services will not be started."
+            )
 
     @app.context_processor
     def inject_debug():
@@ -1269,6 +1412,16 @@ if os.getenv("ANKERCTL_DEV_MODE", "false").lower() == "true":
         return data
 
 
+@app.after_request
+def add_security_headers(response):
+    """Add security-relevant HTTP headers to every response."""
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'SAMEORIGIN'
+    response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    response.headers['Server'] = 'ankerctl'
+    return response
+
+
 # GET endpoints that modify state or expose sensitive debug information
 # and therefore require auth even though they are GET requests.
 _PROTECTED_GET_PATHS = {
@@ -1279,6 +1432,10 @@ _PROTECTED_GET_PATHS = {
     # Sensitive credential exposure: HA MQTT password, Apprise URLs/keys
     "/api/settings/mqtt",
     "/api/notifications/settings",
+    # Exposes printer serial numbers, IP addresses, and MAC addresses
+    "/api/printers",
+    # Exposes full print history (filenames, timestamps, durations)
+    "/api/history",
 }
 
 # POST endpoints needed for initial printer setup (config import / login)
@@ -1286,6 +1443,42 @@ _SETUP_PATHS = {
     "/api/ankerctl/config/upload",
     "/api/ankerctl/config/login",
 }
+
+# URL path prefixes that send commands to the printer and must be blocked
+# when the active device is not supported (e.g. eufyMake E1 UV printer).
+# Any request whose path starts with one of these prefixes is rejected.
+# "/api/filaments" covers both "/api/filaments" (list/create) and
+# "/api/filaments/<id>/apply" (preheat), so no separate exact-match set is needed.
+_PRINTER_CONTROL_PREFIXES = (
+    "/api/printer/",
+    "/api/files/",
+    "/api/filaments",
+)
+
+
+@app.before_request
+def _block_unsupported_device():
+    """Block printer-control endpoints when the active device is unsupported.
+
+    This guard runs before auth so that the 503 is returned even on
+    unauthenticated requests — the device must simply never be commanded.
+    Static assets and config/setup paths are always allowed so the UI
+    remains reachable for configuration changes.
+    """
+    if not app.config.get("unsupported_device"):
+        return None
+
+    path = request.path
+
+    # Always allow static assets
+    if path.startswith("/static/"):
+        return None
+
+    # Block printer-control paths
+    if any(path.startswith(prefix) for prefix in _PRINTER_CONTROL_PREFIXES):
+        return jsonify({"error": "Active device is not supported by ankerctl"}), 503
+
+    return None
 
 
 @app.before_request

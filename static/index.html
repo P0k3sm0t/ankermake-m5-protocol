@@ -2,7 +2,7 @@
 {% import "macro.html" as macro %}
 
 {% block title -%}
-ankerctl{% if printer %} - {{ printer.name }} ({{ printer.sn }}){% endif %}
+ankerctl{% if printer %} - {{ printer.name }}{% endif %}
 {%- endblock %}
 
 {% block contents %}

@@ -204,13 +204,13 @@ $(function () {
         }
 
         _open() {
-            $(this.badge).removeClass("text-bg-success text-bg-danger").addClass("text-bg-warning");
+            $(this.badge).removeClass("text-bg-success text-bg-danger text-bg-secondary").addClass("text-bg-warning");
             if (this.open)
                 this.open(this.ws);
         }
 
         _close() {
-            $(this.badge).removeClass("text-bg-warning text-bg-success").addClass("text-bg-danger");
+            $(this.badge).removeClass("text-bg-warning text-bg-success text-bg-secondary").addClass("text-bg-danger");
             console.log(`${this.name} close`);
             this.is_open = false;
             if (this.autoReconnect) {
@@ -481,13 +481,11 @@ $(function () {
                 return;
             }
             if (data.status === "connected") {
-                $(this.badge).removeClass("text-bg-danger text-bg-warning").addClass("text-bg-success");
+                $(this.badge).removeClass("text-bg-danger text-bg-warning text-bg-secondary").addClass("text-bg-success");
             } else if (data.status === "disconnected") {
-                $(this.badge).removeClass("text-bg-success text-bg-warning").addClass("text-bg-danger");
-                if (this.ws) {
-                    this.ws.close();
-                    this.ws = null;
-                }
+                $(this.badge).removeClass("text-bg-success text-bg-warning text-bg-secondary").addClass("text-bg-danger");
+            } else if (data.status === "dormant") {
+                $(this.badge).removeClass("text-bg-success text-bg-danger text-bg-warning").addClass("text-bg-secondary");
             }
         },
     });
@@ -2846,7 +2844,8 @@ $(function () {
         item.addEventListener("click", function(e) {
             e.preventDefault();
             var newIndex = parseInt(this.getAttribute("data-printer-index"), 10);
-            if (isNaN(newIndex) || this.classList.contains("active")) return;
+            // Skip if already active or if the device is unsupported (disabled item)
+            if (isNaN(newIndex) || this.classList.contains("active") || this.classList.contains("disabled")) return;
 
             if (!confirm("Switch printer? All connections will be restarted.")) return;
 

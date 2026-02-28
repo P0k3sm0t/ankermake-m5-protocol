@@ -412,6 +412,12 @@ class TimelapseService:
             host = "127.0.0.1"
         port = os.getenv("FLASK_PORT") or "4470"
         url = f"http://{host}:{port}/video?for_timelapse=1"
+        # Pass API key as query parameter so /video auth is satisfied when a
+        # key is configured.  The URL is loopback-only and never exposed to clients.
+        api_key = app.config.get("api_key")
+        if api_key:
+            from urllib.parse import quote
+            url += f"&apikey={quote(api_key, safe='')}"
 
         # Per-snapshot light control: turn on, wait for camera to adjust, then shoot
         vq = app.svc.svcs.get("videoqueue") if self._light_mode == "snapshot" else None

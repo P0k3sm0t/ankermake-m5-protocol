@@ -1,10 +1,26 @@
 """Filament profile store backed by SQLite."""
 
+import re
 import sqlite3
 import threading
 import logging
 
 log = logging.getLogger(__name__)
+
+# Fields that are displayed in the UI and must be sanitized against XSS
+_TEXT_FIELDS = {"name", "brand", "notes", "material", "color", "seam_position"}
+
+
+def _sanitize_text(value):
+    """Strip HTML tags from a string value to prevent stored XSS.
+
+    Uses a simple regex sufficient for tag removal without introducing new
+    dependencies. Returns the original value unchanged for non-string types
+    so numeric fields are unaffected.
+    """
+    if isinstance(value, str):
+        return re.sub(r'<[^>]+>', '', value)
+    return value
 
 
 _SCHEMA = """
@@ -329,6 +345,10 @@ class FilamentStore:
     def create(self, data):
         """Insert a new profile. Returns the new profile dict."""
         safe = {k: data[k] for k in _FIELDS if k in data}
+        # Sanitize text fields to prevent stored XSS
+        for field in _TEXT_FIELDS:
+            if field in safe:
+                safe[field] = _sanitize_text(safe[field])
         if "name" not in safe or not safe["name"]:
             raise ValueError("name is required")
         cols = ", ".join(safe.keys())
@@ -348,6 +368,10 @@ class FilamentStore:
     def update(self, profile_id, data):
         """Update an existing profile. Returns the updated profile dict or None."""
         safe = {k: data[k] for k in _FIELDS if k in data}
+        # Sanitize text fields to prevent stored XSS
+        for field in _TEXT_FIELDS:
+            if field in safe:
+                safe[field] = _sanitize_text(safe[field])
         if not safe:
             return self.get(profile_id)
         assignments = ", ".join(f"{k} = ?" for k in safe)

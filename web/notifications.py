@@ -325,6 +325,12 @@ class AppriseNotifier:
             host = "127.0.0.1"
         port = os.getenv("FLASK_PORT") or "4470"
         url = f"http://{host}:{port}/video"
+        # Pass API key as query parameter so the internal /video call is authenticated
+        # when a key is configured.  The URL is loopback-only and never sent to clients.
+        notif_api_key = app.config.get("api_key")
+        if notif_api_key:
+            from urllib.parse import quote as _quote
+            url += f"?apikey={_quote(notif_api_key, safe='')}"
 
         quality = self.snapshot_quality()
         width, height = _SNAPSHOT_SIZES.get(quality, _SNAPSHOT_SIZES[_DEFAULT_SNAPSHOT_QUALITY])
