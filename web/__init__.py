@@ -134,19 +134,6 @@ def mqtt(sock):
     if not app.config["login"] or app.config.get("unsupported_device"):
         return
 
-    # before_request middleware does not run for WebSocket routes, so enforce
-    # API key auth inline here.
-    api_key = app.config.get("api_key")
-    if api_key:
-        authed = (
-            session.get("authenticated")
-            or request.headers.get("X-Api-Key") == api_key
-            or request.args.get("apikey") == api_key
-        )
-        if not authed:
-            log.warning("WebSocket /ws/mqtt rejected: missing or invalid API key")
-            return
-
     for data in app.svc.stream("mqttqueue"):
         log.debug(f"MQTT message: {data}")
         sock.send(json.dumps(data))
@@ -159,19 +146,6 @@ def video(sock):
     """
     if not app.config["login"] or not app.config.get("video_supported") or app.config.get("unsupported_device"):
         return
-
-    # before_request middleware does not run for WebSocket routes, so enforce
-    # API key auth inline here.
-    api_key = app.config.get("api_key")
-    if api_key:
-        authed = (
-            session.get("authenticated")
-            or request.headers.get("X-Api-Key") == api_key
-            or request.args.get("apikey") == api_key
-        )
-        if not authed:
-            log.warning("WebSocket /ws/video rejected: missing or invalid API key")
-            return
 
     vq = app.svc.svcs.get("videoqueue")
     if not vq or not getattr(vq, "video_enabled", False):
@@ -189,33 +163,46 @@ def pppp_state(sock):
     a PPPP ref and never starts the service on its own.  That way the phone
     app can open its own PPPP session even while the web UI is open.
 
+    When MQTT has been silent for >30 seconds and PPPP is not actively
+    connected, a background probe is triggered (at most once per 60s) to
+    check if the printer is reachable on the LAN.
+
     States emitted:
       "dormant"      — service not running (video/timelapse not active)
-      "connected"    — service running and PPPP handshake complete
-      "disconnected" — service was connected but the connection was lost
+      "connected"    — service running and PPPP handshake complete, or probe succeeded
+      "disconnected" — service was connected but the connection was lost, or probe failed
     """
     if not app.config["login"] or app.config.get("unsupported_device"):
         log.info("Websocket connection rejected: no printer configured (use 'config import' or 'config login')")
         return
 
-    # before_request middleware does not run for WebSocket routes, so enforce
-    # API key auth inline here.
-    api_key = app.config.get("api_key")
-    if api_key:
-        authed = (
-            session.get("authenticated")
-            or request.headers.get("X-Api-Key") == api_key
-            or request.args.get("apikey") == api_key
-        )
-        if not authed:
-            log.warning("WebSocket /ws/pppp-state rejected: missing or invalid API key")
-            return
-
     log.info("Starting PPPP state websocket handler")
+
+    import web.service.pppp as pppp_svc
 
     last_status = None
     last_keepalive = 0.0
     pppp_was_connected = False  # True once we see "connected"; resets on dormant
+
+    # Probe state
+    last_probe_time = 0.0
+    PROBE_INTERVAL = 60.0    # don't probe more often than once per minute
+    MQTT_STALE_AFTER = 30.0  # MQTT considered stale after 30s silence
+    probe_result = None      # None=never probed, True=reachable, False=unreachable
+    probe_thread = None
+
+    def _run_probe():
+        nonlocal probe_result, last_probe_time
+        config = app.config["config"]
+        idx = app.config["printer_index"]
+        probe_result = pppp_svc.probe_pppp(config, idx)
+        last_probe_time = time.time()
+        log.info(f"PPPP probe result: {'ok' if probe_result else 'fail'}")
+
+    # Kick off an immediate probe so the badge reflects reality as soon as the WS connects.
+    probe_thread = threading.Thread(target=_run_probe, daemon=True)
+    probe_thread.start()
+    log.info("Starting initial PPPP probe on WS connect")
 
     try:
         while True:
@@ -227,14 +214,32 @@ def pppp_state(sock):
             if pppp is not None and bool(getattr(pppp, "connected", False)):
                 current_status = "connected"
                 pppp_was_connected = True
-            elif pppp is not None and getattr(pppp, "wanted", False) and pppp_was_connected:
-                # Service is still wanted but lost its PPPP connection.
-                current_status = "disconnected"
+                probe_result = None  # reset probe state when actually connected
             else:
-                # Service not running or connecting for the first time → dormant.
-                current_status = "dormant"
-                if pppp is None or not getattr(pppp, "wanted", False):
-                    pppp_was_connected = False
+                # Check MQTT staleness to decide whether to probe
+                mqtt_svc = app.svc.svcs.get("mqttqueue")
+                mqtt_last = getattr(mqtt_svc, "last_message_time", 0.0) if mqtt_svc else 0.0
+                mqtt_stale = mqtt_last > 0 and (now - mqtt_last) > MQTT_STALE_AFTER
+
+                probe_running = probe_thread is not None and probe_thread.is_alive()
+
+                if mqtt_stale and not probe_running and (now - last_probe_time) > PROBE_INTERVAL:
+                    probe_thread = threading.Thread(target=_run_probe, daemon=True)
+                    probe_thread.start()
+                    log.info("MQTT stale — starting PPPP probe")
+
+                if probe_result is True:
+                    current_status = "connected"
+                elif probe_result is False:
+                    current_status = "disconnected"
+                elif pppp is not None and getattr(pppp, "wanted", False) and pppp_was_connected:
+                    # Service is still wanted but lost its PPPP connection.
+                    current_status = "disconnected"
+                else:
+                    # Service not running or connecting for the first time → dormant.
+                    current_status = "dormant"
+                    if pppp is None or not getattr(pppp, "wanted", False):
+                        pppp_was_connected = False
 
             if current_status != last_status or (current_status == "connected" and now - last_keepalive >= 10.0):
                 sock.send(json.dumps({"status": current_status}))
@@ -261,19 +266,6 @@ def upload(sock):
     if not app.config["login"] or app.config.get("unsupported_device"):
         return
 
-    # before_request middleware does not run for WebSocket routes, so enforce
-    # API key auth inline here.
-    api_key = app.config.get("api_key")
-    if api_key:
-        authed = (
-            session.get("authenticated")
-            or request.headers.get("X-Api-Key") == api_key
-            or request.args.get("apikey") == api_key
-        )
-        if not authed:
-            log.warning("WebSocket /ws/upload rejected: missing or invalid API key")
-            return
-
     for data in app.svc.stream("filetransfer"):
         sock.send(json.dumps(data))
 
@@ -285,19 +277,6 @@ def ctrl(sock):
     """
     if not app.config["login"] or app.config.get("unsupported_device"):
         return
-
-    # before_request middleware does not run for WebSocket routes, so enforce
-    # API key auth inline here for this write-capable endpoint.
-    api_key = app.config.get("api_key")
-    if api_key:
-        authed = (
-            session.get("authenticated")
-            or request.headers.get("X-Api-Key") == api_key
-            or request.args.get("apikey") == api_key
-        )
-        if not authed:
-            log.warning("WebSocket /ws/ctrl rejected: missing or invalid API key")
-            return
 
     # send a response on connect, to let the client know the connection is ready
     sock.send(json.dumps({"ankerctl": 1}))
@@ -1400,6 +1379,22 @@ if os.getenv("ANKERCTL_DEV_MODE", "false").lower() == "true":
         threading.Thread(target=svc.restart, daemon=True).start()
         return {"status": "restarting"}
 
+    @app.post("/api/debug/services/<name>/test")
+    def app_api_debug_service_test(name):
+        """Run a quick connectivity probe for a service. Currently only 'pppp' is supported."""
+        if name != "pppp":
+            return {"error": f"Test not supported for service '{name}'"}, 400
+
+        import web.service.pppp as pppp_svc
+        config = app.config["config"]
+        idx = app.config["printer_index"]
+
+        if not config:
+            return {"error": "No printer configured"}, 503
+
+        ok = pppp_svc.probe_pppp(config, idx)
+        return {"result": "ok" if ok else "fail"}
+
     @app.get("/api/debug/bed-leveling")
     def app_api_debug_bed_leveling():
         """Read the bed leveling grid from the printer (debug endpoint).
@@ -1454,6 +1449,18 @@ _PRINTER_CONTROL_PREFIXES = (
     "/api/files/",
     "/api/filaments",
 )
+
+
+@app.before_request
+def _require_printer_for_control():
+    """Return 503 on printer-control endpoints when no printer is configured yet."""
+    if app.config["login"]:
+        return None
+    if request.path.startswith("/static/"):
+        return None
+    if any(request.path.startswith(prefix) for prefix in _PRINTER_CONTROL_PREFIXES):
+        return jsonify({"error": "No printer configured. Please set up ankerctl first."}), 503
+    return None
 
 
 @app.before_request

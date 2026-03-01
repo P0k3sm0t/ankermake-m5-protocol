@@ -45,6 +45,7 @@ class MqttQueue(Service):
 
         self._reset_print_state()
         self._gcode_layer_count = None  # Override from GCode header, survives print resets
+        self._last_message_time = 0.0
 
     def set_gcode_layer_count(self, count: int):
         """Store the layer count extracted from a GCode header for UI display."""
@@ -92,6 +93,10 @@ class MqttQueue(Service):
     def ha(self):
         return self._ha
 
+    @property
+    def last_message_time(self):
+        return self._last_message_time
+
     def worker_run(self, timeout):
         # Poll status every 10 seconds if idle
         now = time.time()
@@ -100,6 +105,7 @@ class MqttQueue(Service):
             self._last_query = now
 
         for msg, body in self.client.fetch(timeout=timeout):
+            self._last_message_time = time.time()
             log.info(f"TOPIC [{msg.topic}]")
             log.debug(enhex(msg.payload[:]))
             if body and getattr(self, "_debug_log_payloads", False):

@@ -12,6 +12,39 @@ from libflagship.ppppapi import AnkerPPPPAsyncApi, PPPPState
 
 import cli.pppp
 
+
+def probe_pppp(config, printer_index) -> bool:
+    """Try a PPPP LAN connection. Returns True if handshake succeeds, False otherwise."""
+    try:
+        with config.open() as cfg:
+            if not cfg:
+                return False
+            printer = cfg.printers[printer_index]
+
+        ip_addr = cli.pppp.pppp_resolve_printer_ip(config, printer, printer_index)
+        if not ip_addr:
+            return False
+
+        deadline = datetime.now() + timedelta(seconds=5)
+        api = AnkerPPPPAsyncApi.open_lan(Duid.from_string(printer.p2p_duid), host=ip_addr)
+        api.connect_lan_search()
+
+        while api.state != PPPPState.Connected:
+            remaining = (deadline - datetime.now()).total_seconds()
+            if remaining <= 0:
+                return False
+            try:
+                msg = api.recv(timeout=remaining)
+                api.process(msg)
+            except StopIteration:
+                return False
+
+        api.send(PktClose())
+        return True
+    except Exception:
+        return False
+
+
 class PPPPService(Service):
 
     def __init__(self):

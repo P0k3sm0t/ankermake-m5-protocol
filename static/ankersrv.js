@@ -2278,6 +2278,19 @@ $(function () {
 
                 Object.entries(data.services).forEach(([name, svc]) => {
                     const badgeClass = serviceStateClass(svc.state);
+                    let savedTestHtml = "";
+                    if (name === "pppp") {
+                        const saved = JSON.parse(localStorage.getItem("pppp_test_result") || "null");
+                        if (saved) {
+                            const ok = saved.result === "ok";
+                            const secs = Math.round((Date.now() - saved.ts) / 1000);
+                            const agoStr = secs < 60 ? `${secs}s` : secs < 3600 ? `${Math.round(secs / 60)}m` : `${Math.round(secs / 3600)}h`;
+                            savedTestHtml = `<span class="${ok ? "text-success" : "text-danger"}">
+                                <i class="bi-${ok ? "check-circle" : "x-circle"}"></i>
+                                Last result: ${ok ? "ok" : "fail"} <span class="text-muted">(${agoStr} ago)</span>
+                            </span>`;
+                        }
+                    }
                     const card = $(`<div class="col-md-6 col-lg-4">
                         <div class="card border-secondary h-100">
                             <div class="card-header d-flex justify-content-between align-items-center small">
@@ -2292,11 +2305,18 @@ $(function () {
                                     <span class="me-2">Refs: ${svc.refs}</span>
                                     <span>Wanted: <span class="${svc.wanted ? 'text-success' : 'text-danger'}">${svc.wanted}</span></span>
                                 </div>
-                                <button class="btn btn-sm btn-outline-warning w-100 dbg-restart-svc"
-                                    data-svc-name="${escapeHtml(name)}"
-                                    data-is-printing="${isPrinting}">
-                                    <i class="bi-arrow-clockwise"></i> Restart
-                                </button>
+                                <div class="d-grid gap-1">
+                                    <button class="btn btn-sm btn-outline-warning w-100 dbg-restart-svc"
+                                        data-svc-name="${escapeHtml(name)}"
+                                        data-is-printing="${isPrinting}">
+                                        <i class="bi-arrow-clockwise"></i> Restart
+                                    </button>
+                                    ${name === "pppp" ? `<button class="btn btn-sm btn-outline-info w-100 dbg-test-svc"
+                                        data-svc-name="${escapeHtml(name)}">
+                                        <i class="bi-wifi"></i> Test
+                                    </button>
+                                    <div class="dbg-test-result small text-center" data-svc-name="${escapeHtml(name)}">${savedTestHtml}</div>` : ""}
+                                </div>
                             </div>
                         </div>
                     </div>`);
@@ -2333,6 +2353,34 @@ $(function () {
                 }
             } catch (err) {
                 flash_message(`Restart failed: ${err}`, "danger");
+            }
+        });
+
+        // Test button handler (delegated) — currently only supports "pppp"
+        $(document).on("click", ".dbg-test-svc", async function () {
+            const name = $(this).data("svc-name");
+            const resultDiv = $(`.dbg-test-result[data-svc-name="${name}"]`);
+            $(this).prop("disabled", true).html('<i class="bi-hourglass-split"></i> Testing...');
+            resultDiv.html('<span class="text-muted">running...</span>');
+            try {
+                const resp = await fetch(`/api/debug/services/${encodeURIComponent(name)}/test`, {
+                    method: "POST",
+                });
+                const data = await resp.json();
+                if (resp.ok) {
+                    const ok = data.result === "ok";
+                    localStorage.setItem("pppp_test_result", JSON.stringify({ result: ok ? "ok" : "fail", ts: Date.now() }));
+                    resultDiv.html(`<span class="${ok ? "text-success" : "text-danger"}">
+                        <i class="bi-${ok ? "check-circle" : "x-circle"}"></i>
+                        Last result: ${ok ? "ok" : "fail"} <span class="text-muted">(just now)</span>
+                    </span>`);
+                } else {
+                    resultDiv.html(`<span class="text-danger small">${escapeHtml(data.error || "Error")}</span>`);
+                }
+            } catch (err) {
+                resultDiv.html(`<span class="text-danger small">${escapeHtml(String(err))}</span>`);
+            } finally {
+                $(this).prop("disabled", false).html('<i class="bi-wifi"></i> Test');
             }
         });
 
