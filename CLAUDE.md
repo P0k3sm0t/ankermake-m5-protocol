@@ -423,7 +423,7 @@ for messages every 100ms.
 | `2` | Print paused (no internal state change; ct=1008 value=2 triggers this) |
 | `8` | Printer-side abort (touchscreen cancel) — record fail with reason "aborted" |
 
-**Progress scale:** ct=1001 `progress` field is on a 0-1000 scale. `_normalize_progress()` converts to 0-100.
+**Progress scale:** ct=1001 `progress` field is on a 0-10000 scale. `_normalize_progress()` converts to 0-100 (divides by 100). Frontend divides by 100 directly.
 
 **Layer count:** ct=1052 provides `real_print_layer` and `total_layer`. If `_gcode_layer_count` is set (from GCode header), `total_layer` is overridden before forwarding to WebSocket.
 
@@ -626,7 +626,7 @@ See `documentation/MQTT_COMMANDS.md` for the full MQTT command type reference, t
 
 **Most-used command types:** `ZZ_MQTT_CMD_GCODE_COMMAND` (0x0413, ct=1043), `ZZ_MQTT_CMD_PRINT_CONTROL` (0x03f0, ct=1008: 2=pause, 3=resume, 4=stop), `ZZ_MQTT_CMD_AUTO_LEVELING` (0x03ef).
 
-**Key notification types:** ct=1000 (state: 0=idle, 1=printing, 2=paused, 8=aborted), ct=1001 (progress 0-1000 scale), ct=1003/1004 (nozzle/bed temp in 1/100 °C), ct=1007 (auto-level probe progress), ct=1044 (file path at print start), ct=1052 (layer counts).
+**Key notification types:** ct=1000 (state: 0=idle, 1=printing, 2=paused, 8=aborted), ct=1001 (progress 0-10000 scale + time remaining/elapsed + filename + realSpeed), ct=1003/1004 (nozzle/bed temp in 1/100 °C), ct=1007 (auto-level probe progress), ct=1044 (file path at print start), ct=1052 (layer counts — not used for % progress, use ct=1001 instead).
 
 ## Feature Notes
 

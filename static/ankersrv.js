@@ -302,10 +302,19 @@ $(function () {
                     _onMqttStateChange(data.value);
                 }
             } else if (data.commandType == 1001) {
-                // ZZ_MQTT_CMD_PRINT_SCHEDULE: time=remaining, totalTime=elapsed
+                // ZZ_MQTT_CMD_PRINT_SCHEDULE: time=remaining, totalTime=elapsed, progress=0-10000
                 $("#time-remain").text(getTime(data.time));
                 if (data.totalTime !== undefined) {
                     $("#time-elapsed").text(getTime(data.totalTime));
+                }
+                if (data.progress !== undefined) {
+                    const progress = Math.min(100, Math.round(data.progress / 100));
+                    $("#progressbar").attr("aria-valuenow", progress);
+                    $("#progressbar").attr("style", `width: ${progress}%`);
+                    $("#progress").text(`${progress}%`);
+                    document.title = progress > 0 && progress < 100
+                        ? `\u{1F5A8}\uFE0F ${progress}% | ankerctl`
+                        : "ankerctl";
                 }
             } else if (data.commandType == 1003) {
                 // Returns Nozzle Temp
@@ -351,18 +360,9 @@ $(function () {
                 const baseName = filePath.split("/").pop().split("\\").pop();
                 $("#print-name").text(baseName);
             } else if (data.commandType == 1052) {
-                // Returns Layer Info; derive progress from layer counts
+                // Returns Layer Info — layer display only; progress comes from ct=1001
                 const layer = `${data.real_print_layer} / ${data.total_layer}`;
                 $("#print-layer").text(layer);
-                if (data.total_layer > 0) {
-                    const progress = Math.round((data.real_print_layer / data.total_layer) * 100);
-                    $("#progressbar").attr("aria-valuenow", progress);
-                    $("#progressbar").attr("style", `width: ${progress}%`);
-                    $("#progress").text(`${progress}%`);
-                    document.title = progress > 0 && progress < 100
-                        ? `\u{1F5A8}\uFE0F ${progress}% | ankerctl`
-                        : "ankerctl";
-                }
             } else {
                 console.log("Unhandled mqtt message:", data);
             }
@@ -2374,6 +2374,12 @@ $(function () {
                         <i class="bi-${ok ? "check-circle" : "x-circle"}"></i>
                         Last result: ${ok ? "ok" : "fail"} <span class="text-muted">(just now)</span>
                     </span>`);
+                    // Immediately reflect result in the main PPPP badge
+                    if (ok) {
+                        $("#badge-pppp").removeClass("text-bg-danger text-bg-warning text-bg-secondary").addClass("text-bg-success");
+                    } else {
+                        $("#badge-pppp").removeClass("text-bg-success text-bg-warning text-bg-secondary").addClass("text-bg-danger");
+                    }
                 } else {
                     resultDiv.html(`<span class="text-danger small">${escapeHtml(data.error || "Error")}</span>`);
                 }

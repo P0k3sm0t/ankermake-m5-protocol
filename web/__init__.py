@@ -186,18 +186,26 @@ def pppp_state(sock):
 
     # Probe state
     last_probe_time = 0.0
-    PROBE_INTERVAL = 60.0    # don't probe more often than once per minute
+    PROBE_INTERVAL = 60.0    # back-off interval after MAX_RETRIES failures
+    RETRY_INTERVAL = 15.0    # interval between retries after a failure
     MQTT_STALE_AFTER = 30.0  # MQTT considered stale after 30s silence
+    MAX_RETRIES = 2          # retries after first failure before switching to PROBE_INTERVAL
     probe_result = None      # None=never probed, True=reachable, False=unreachable
     probe_thread = None
+    probe_fail_count = 0     # consecutive failures since last success
+    mqtt_was_stale = False   # tracks previous stale state to detect recovery
 
     def _run_probe():
-        nonlocal probe_result, last_probe_time
+        nonlocal probe_result, last_probe_time, probe_fail_count
         config = app.config["config"]
         idx = app.config["printer_index"]
         probe_result = pppp_svc.probe_pppp(config, idx)
         last_probe_time = time.time()
-        log.info(f"PPPP probe result: {'ok' if probe_result else 'fail'}")
+        if probe_result:
+            probe_fail_count = 0
+        else:
+            probe_fail_count += 1
+        log.info(f"PPPP probe result: {'ok' if probe_result else 'fail'} (fail_count={probe_fail_count})")
 
     # Kick off an immediate probe so the badge reflects reality as soon as the WS connects.
     probe_thread = threading.Thread(target=_run_probe, daemon=True)
@@ -215,18 +223,36 @@ def pppp_state(sock):
                 current_status = "connected"
                 pppp_was_connected = True
                 probe_result = None  # reset probe state when actually connected
+                probe_fail_count = 0
             else:
-                # Check MQTT staleness to decide whether to probe
+                # Check MQTT staleness and detect recovery transition
                 mqtt_svc = app.svc.svcs.get("mqttqueue")
                 mqtt_last = getattr(mqtt_svc, "last_message_time", 0.0) if mqtt_svc else 0.0
                 mqtt_stale = mqtt_last > 0 and (now - mqtt_last) > MQTT_STALE_AFTER
 
+                mqtt_recovered = mqtt_was_stale and not mqtt_stale
+                if mqtt_recovered:
+                    # MQTT just came back — reset stale probe result and re-probe immediately
+                    log.info("MQTT recovered — resetting PPPP probe state")
+                    probe_result = None
+                    probe_fail_count = 0
+                mqtt_was_stale = mqtt_stale
+
                 probe_running = probe_thread is not None and probe_thread.is_alive()
 
-                if mqtt_stale and not probe_running and (now - last_probe_time) > PROBE_INTERVAL:
+                # Short retries for first MAX_RETRIES failures; long back-off once the printer is clearly offline
+                next_interval = RETRY_INTERVAL if probe_fail_count <= MAX_RETRIES else PROBE_INTERVAL
+
+                should_probe = (
+                    (mqtt_stale or mqtt_recovered or probe_result is False)
+                    and not probe_running
+                    and (now - last_probe_time) > next_interval
+                )
+                if should_probe:
                     probe_thread = threading.Thread(target=_run_probe, daemon=True)
                     probe_thread.start()
-                    log.info("MQTT stale — starting PPPP probe")
+                    reason = "MQTT recovered" if mqtt_recovered else ("MQTT stale" if mqtt_stale else "retry after fail")
+                    log.info(f"Starting PPPP probe ({reason}, fail_count={probe_fail_count})")
 
                 if probe_result is True:
                     current_status = "connected"

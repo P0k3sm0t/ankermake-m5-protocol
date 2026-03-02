@@ -33,6 +33,7 @@
                             {{ macro.bi_icon("bell") }} Notifications
                         </button>
                     </li>
+                    {% if video_supported %}
                     <li class="nav-item" role="presentation">
                         <button class="nav-link" id="setup-timelapse-tab" data-bs-toggle="pill"
                             data-bs-target="#setup-timelapse-pane" type="button" role="tab"
@@ -40,6 +41,7 @@
                             {{ macro.bi_icon("camera-reels") }} Timelapse
                         </button>
                     </li>
+                    {% endif %}
                     <li class="nav-item" role="presentation">
                         <button class="nav-link" id="setup-mqtt-tab" data-bs-toggle="pill"
                             data-bs-target="#setup-mqtt-pane" type="button" role="tab" aria-controls="setup-mqtt-pane"
@@ -444,6 +446,7 @@
                                             <input class="form-control" type="number" min="1" max="100" step="1"
                                                 id="apprise-progress-interval" />
                                         </div>
+                                        {% if video_supported %}
                                         <div class="col-md-4">
                                             <label class="form-label" for="apprise-snapshot-quality">Snapshot
                                                 quality</label>
@@ -452,6 +455,7 @@
                                                 <option value="fhd">FHD (1080p)</option>
                                             </select>
                                         </div>
+                                        {% endif %}
                                         <div class="col-md-4">
                                             <div class="form-check form-switch mt-4">
                                                 <input class="form-check-input" type="checkbox" role="switch"
@@ -459,12 +463,14 @@
                                                 <label class="form-check-label" for="apprise-progress-image">Include
                                                     image when available</label>
                                             </div>
+                                            {% if video_supported %}
                                             <div class="form-check form-switch mt-2">
                                                 <input class="form-check-input" type="checkbox" role="switch"
                                                     id="apprise-snapshot-light" />
                                                 <label class="form-check-label" for="apprise-snapshot-light">Light on
                                                     snapshot</label>
                                             </div>
+                                            {% endif %}
                                             <div class="form-check form-switch mt-2">
                                                 <input class="form-check-input" type="checkbox" role="switch"
                                                     id="apprise-snapshot-fallback" />
@@ -493,6 +499,7 @@
                     </div>
 
                     <!-- ===== TIMELAPSE TAB ===== -->
+                    {% if video_supported %}
                     <div class="tab-pane fade" id="setup-timelapse-pane" role="tabpanel"
                         aria-labelledby="setup-timelapse-tab">
                         <div class="card">
@@ -538,6 +545,7 @@
                             </div>
                         </div>
                     </div>
+                    {% endif %}
 
                     <!-- ===== MQTT / HOME ASSISTANT TAB ===== -->
                     <div class="tab-pane fade" id="setup-mqtt-pane" role="tabpanel" aria-labelledby="setup-mqtt-tab">
