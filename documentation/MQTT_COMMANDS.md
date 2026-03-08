@@ -84,8 +84,8 @@ The following `commandType` values are emitted by the printer as unsolicited sta
 | :--- | :--- | :--- | :--- |
 | `1000` | `0x03e8` | `value` | Printer state machine: `0` = idle/finished, `1` = active/printing, `2` = paused, `8` = aborted (user cancelled via touchscreen or calibration phase) |
 | `1001` | `0x03e9` | `time` | Remaining print time in seconds |
-| `1003` | `0x03eb` | `currentTemp`, `targetTemp` | Nozzle temperature (units: 1/100 °C) |
-| `1004` | `0x03ec` | `currentTemp`, `targetTemp` | Hotbed temperature (units: 1/100 °C) |
+| `1003` | `0x03eb` | `currentTemp`, `targetTemp` | Nozzle temperature (units: 1/100 °C), `targetTemp` intermittently missing on M5C |
+| `1004` | `0x03ec` | `currentTemp`, `targetTemp` | Hotbed temperature (units: 1/100 °C), `targetTemp` intermittently missing on M5C |
 | `1006` | `0x03ee` | `value` | Print speed in mm/s |
 | `1007` | `0x03ef` | `value` | Auto-leveling probe progress — emitted after each probe point during G29; `value` = current point index (50 total: 1 initial center probe + 7×7 grid). Use this to display a live progress bar. |
 | `1044` | `0x0414` | `filePath` | GCode file path — sent when a print job starts; basename is used as the filename |
