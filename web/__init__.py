@@ -72,6 +72,8 @@ app.config.from_prefixed_env()
 if not app.secret_key:
     app.secret_key = token(24)
 app.svc = ServiceManager()
+app.filament_swap_lock = threading.Lock()
+app.filament_swap_state = None
 
 # Configurable upload size limit (default: 2 GB)
 max_upload_mb = int(os.getenv("UPLOAD_MAX_MB", "2048"))
@@ -115,6 +117,133 @@ def _resolve_apprise(cfg):
     if isinstance(progress, dict):
         progress.pop("max_value", None)
     return apprise
+
+
+FILAMENT_SERVICE_DEFAULT_LENGTH_MM = 40.0
+FILAMENT_SERVICE_MAX_LENGTH_MM = 300.0
+FILAMENT_SERVICE_FEEDRATE_MM_MIN = 240
+FILAMENT_SERVICE_HEAT_TIMEOUT_S = 240.0
+FILAMENT_SERVICE_HEAT_POLL_S = 0.5
+FILAMENT_SERVICE_HEAT_TOLERANCE_C = 5
+
+
+def _filament_service_temp(profile):
+    temp = (
+        profile.get("nozzle_temp_other_layer")
+        or profile.get("nozzle_temp_first_layer")
+        or profile.get("nozzle_temp")
+        or 0
+    )
+    try:
+        temp = int(temp)
+    except (TypeError, ValueError):
+        temp = 0
+    if temp <= 0:
+        raise ValueError("Filament profile has no usable nozzle temperature")
+    return temp
+
+
+def _filament_service_length(payload, key):
+    raw = payload.get(key, FILAMENT_SERVICE_DEFAULT_LENGTH_MM)
+    try:
+        length_mm = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"{key} must be a number")
+    if length_mm <= 0:
+        raise ValueError(f"{key} must be greater than 0")
+    if length_mm > FILAMENT_SERVICE_MAX_LENGTH_MM:
+        raise ValueError(f"{key} must be <= {FILAMENT_SERVICE_MAX_LENGTH_MM:g}")
+    return round(length_mm, 2)
+
+
+def _filament_service_profile(payload, key):
+    try:
+        profile_id = int(payload.get(key))
+    except (TypeError, ValueError):
+        raise ValueError(f"{key} must be an integer")
+    profile = app.filaments.get(profile_id)
+    if profile is None:
+        raise LookupError(f"Filament profile {profile_id} not found")
+    return profile
+
+
+def _format_extrusion_mm(length_mm):
+    text = f"{length_mm:.2f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _build_filament_move_gcode(temp_c, delta_mm):
+    extrusion = _format_extrusion_mm(delta_mm)
+    return "\n".join([
+        "M83",
+        "G92 E0",
+        f"G1 E{extrusion} F{FILAMENT_SERVICE_FEEDRATE_MM_MIN}",
+        "G92 E0",
+        "M82",
+        "M400",
+    ])
+
+
+def _serialize_filament_swap_state(state):
+    if not state:
+        return {"pending": False, "swap": None}
+    return {
+        "pending": True,
+        "swap": {
+            "token": state["token"],
+            "created_at": state["created_at"],
+            "unload_profile_id": state["unload_profile_id"],
+            "unload_profile_name": state["unload_profile_name"],
+            "load_profile_id": state["load_profile_id"],
+            "load_profile_name": state["load_profile_name"],
+            "unload_temp_c": state["unload_temp_c"],
+            "load_temp_c": state["load_temp_c"],
+            "unload_length_mm": state["unload_length_mm"],
+            "load_length_mm": state["load_length_mm"],
+        },
+    }
+
+
+def _send_filament_service_gcode(gcode):
+    with app.svc.borrow("mqttqueue") as mqtt:
+        if not mqtt:
+            raise ConnectionError("MQTT service unavailable")
+        if mqtt.is_printing:
+            raise RuntimeError("Filament service commands are blocked while a print is active")
+        mqtt.send_gcode(gcode)
+
+
+def _assert_filament_service_ready(mqtt):
+    if not mqtt:
+        raise ConnectionError("MQTT service unavailable")
+    if mqtt.is_printing:
+        raise RuntimeError("Filament service commands are blocked while a print is active")
+
+
+def _wait_for_filament_service_nozzle(mqtt, target_temp_c):
+    deadline = time.monotonic() + FILAMENT_SERVICE_HEAT_TIMEOUT_S
+    next_query = 0.0
+    last_temp = mqtt.nozzle_temp
+    target_ready = int(target_temp_c) - FILAMENT_SERVICE_HEAT_TOLERANCE_C
+
+    while time.monotonic() < deadline:
+        now = time.monotonic()
+        if now >= next_query:
+            mqtt.request_status()
+            next_query = now + 2.0
+
+        current_temp = mqtt.nozzle_temp
+        if current_temp is not None:
+            last_temp = current_temp
+            if current_temp >= target_ready:
+                return current_temp
+
+        time.sleep(FILAMENT_SERVICE_HEAT_POLL_S)
+
+    raise TimeoutError(
+        f"Nozzle did not reach {int(target_temp_c)}°C within {int(FILAMENT_SERVICE_HEAT_TIMEOUT_S)}s "
+        f"(last seen: {last_temp if last_temp is not None else 'unknown'}°C)"
+    )
 
 
 # autopep8: off
@@ -1215,6 +1344,210 @@ def app_api_filaments_duplicate(profile_id):
     if profile is None:
         return {"error": "Profile not found"}, 404
     return profile, 201
+
+
+@app.get("/api/filaments/service/swap")
+def app_api_filament_service_swap_state():
+    with app.filament_swap_lock:
+        return _serialize_filament_swap_state(app.filament_swap_state)
+
+
+@app.post("/api/filaments/service/preheat")
+def app_api_filament_service_preheat():
+    payload = request.get_json(silent=True) or {}
+    try:
+        profile = _filament_service_profile(payload, "profile_id")
+        temp_c = _filament_service_temp(profile)
+        gcode = f"M104 S{temp_c}"
+        with app.svc.borrow("mqttqueue") as mqtt:
+            _assert_filament_service_ready(mqtt)
+            mqtt.send_gcode(gcode)
+    except ValueError as exc:
+        return {"error": str(exc)}, 400
+    except LookupError as exc:
+        return {"error": str(exc)}, 404
+    except RuntimeError as exc:
+        return {"error": str(exc)}, 409
+    except ConnectionError as exc:
+        return {"error": str(exc)}, 503
+
+    return {
+        "status": "ok",
+        "action": "preheat",
+        "profile_id": profile["id"],
+        "profile_name": profile["name"],
+        "target_temp_c": temp_c,
+        "gcode": gcode,
+    }
+
+
+@app.post("/api/filaments/service/move")
+def app_api_filament_service_move():
+    payload = request.get_json(silent=True) or {}
+    action = str(payload.get("action", "")).strip().lower()
+    if action not in {"extrude", "retract"}:
+        return {"error": "action must be 'extrude' or 'retract'"}, 400
+
+    try:
+        profile = _filament_service_profile(payload, "profile_id")
+        temp_c = _filament_service_temp(profile)
+        length_mm = _filament_service_length(payload, "length_mm")
+        delta_mm = length_mm if action == "extrude" else -length_mm
+        gcode = _build_filament_move_gcode(temp_c, delta_mm)
+        with app.svc.borrow("mqttqueue") as mqtt:
+            _assert_filament_service_ready(mqtt)
+            current_temp = mqtt.nozzle_temp
+            wait_for_heat = current_temp is None or current_temp < (temp_c - FILAMENT_SERVICE_HEAT_TOLERANCE_C)
+            if wait_for_heat:
+                mqtt.send_gcode(f"M104 S{temp_c}")
+                current_temp = _wait_for_filament_service_nozzle(mqtt, temp_c)
+            mqtt.send_gcode(gcode)
+    except ValueError as exc:
+        return {"error": str(exc)}, 400
+    except LookupError as exc:
+        return {"error": str(exc)}, 404
+    except RuntimeError as exc:
+        return {"error": str(exc)}, 409
+    except TimeoutError as exc:
+        return {"error": str(exc)}, 504
+    except ConnectionError as exc:
+        return {"error": str(exc)}, 503
+
+    return {
+        "status": "ok",
+        "action": action,
+        "profile_id": profile["id"],
+        "profile_name": profile["name"],
+        "target_temp_c": temp_c,
+        "current_temp_c": current_temp,
+        "length_mm": length_mm,
+        "gcode": gcode,
+    }
+
+
+@app.post("/api/filaments/service/swap/start")
+def app_api_filament_service_swap_start():
+    payload = request.get_json(silent=True) or {}
+    try:
+        unload_profile = _filament_service_profile(payload, "unload_profile_id")
+        load_profile = _filament_service_profile(payload, "load_profile_id")
+        unload_temp_c = _filament_service_temp(unload_profile)
+        load_temp_c = _filament_service_temp(load_profile)
+        unload_length_mm = _filament_service_length(payload, "unload_length_mm")
+        load_length_mm = _filament_service_length(payload, "load_length_mm")
+    except ValueError as exc:
+        return {"error": str(exc)}, 400
+    except LookupError as exc:
+        return {"error": str(exc)}, 404
+
+    with app.filament_swap_lock:
+        if app.filament_swap_state is not None:
+            return {"error": "A filament swap is already in progress"}, 409
+
+    gcode = _build_filament_move_gcode(unload_temp_c, -unload_length_mm)
+    try:
+        with app.svc.borrow("mqttqueue") as mqtt:
+            _assert_filament_service_ready(mqtt)
+            current_temp = mqtt.nozzle_temp
+            if current_temp is None or current_temp < (unload_temp_c - FILAMENT_SERVICE_HEAT_TOLERANCE_C):
+                mqtt.send_gcode(f"M104 S{unload_temp_c}")
+                _wait_for_filament_service_nozzle(mqtt, unload_temp_c)
+            mqtt.send_gcode(gcode)
+    except RuntimeError as exc:
+        return {"error": str(exc)}, 409
+    except TimeoutError as exc:
+        return {"error": str(exc)}, 504
+    except ConnectionError as exc:
+        return {"error": str(exc)}, 503
+
+    swap_state = {
+        "token": token(12),
+        "created_at": int(time.time()),
+        "unload_profile_id": unload_profile["id"],
+        "unload_profile_name": unload_profile["name"],
+        "load_profile_id": load_profile["id"],
+        "load_profile_name": load_profile["name"],
+        "unload_temp_c": unload_temp_c,
+        "load_temp_c": load_temp_c,
+        "unload_length_mm": unload_length_mm,
+        "load_length_mm": load_length_mm,
+    }
+    with app.filament_swap_lock:
+        app.filament_swap_state = swap_state
+
+    return {
+        "status": "ok",
+        "message": (
+            f"Unload started for {unload_profile['name']}. "
+            f"Swap the filament, then confirm to load {load_profile['name']}."
+        ),
+        "gcode": gcode,
+        **_serialize_filament_swap_state(swap_state),
+    }
+
+
+@app.post("/api/filaments/service/swap/confirm")
+def app_api_filament_service_swap_confirm():
+    payload = request.get_json(silent=True) or {}
+    with app.filament_swap_lock:
+        swap_state = app.filament_swap_state
+        if swap_state is None:
+            return {"error": "No filament swap is in progress"}, 409
+        provided_token = payload.get("token")
+        if provided_token and provided_token != swap_state["token"]:
+            return {"error": "Swap token mismatch"}, 409
+
+    gcode = _build_filament_move_gcode(swap_state["load_temp_c"], swap_state["load_length_mm"])
+    try:
+        with app.svc.borrow("mqttqueue") as mqtt:
+            _assert_filament_service_ready(mqtt)
+            current_temp = mqtt.nozzle_temp
+            if current_temp is None or current_temp < (swap_state["load_temp_c"] - FILAMENT_SERVICE_HEAT_TOLERANCE_C):
+                mqtt.send_gcode(f"M104 S{swap_state['load_temp_c']}")
+                _wait_for_filament_service_nozzle(mqtt, swap_state["load_temp_c"])
+            mqtt.send_gcode(gcode)
+    except RuntimeError as exc:
+        return {"error": str(exc)}, 409
+    except TimeoutError as exc:
+        return {"error": str(exc)}, 504
+    except ConnectionError as exc:
+        return {"error": str(exc)}, 503
+
+    with app.filament_swap_lock:
+        app.filament_swap_state = None
+
+    return {
+        "status": "ok",
+        "message": (
+            f"Load / purge started for {swap_state['load_profile_name']} "
+            f"at {swap_state['load_temp_c']}°C."
+        ),
+        "gcode": gcode,
+        "completed_swap": swap_state,
+        "pending": False,
+        "swap": None,
+    }
+
+
+@app.post("/api/filaments/service/swap/cancel")
+def app_api_filament_service_swap_cancel():
+    payload = request.get_json(silent=True) or {}
+    with app.filament_swap_lock:
+        swap_state = app.filament_swap_state
+        if swap_state is None:
+            return {"status": "ok", "pending": False, "swap": None}
+        provided_token = payload.get("token")
+        if provided_token and provided_token != swap_state["token"]:
+            return {"error": "Swap token mismatch"}, 409
+        app.filament_swap_state = None
+
+    return {
+        "status": "ok",
+        "message": "Filament swap cancelled.",
+        "cancelled_swap": swap_state,
+        "pending": False,
+        "swap": None,
+    }
 
 
 @app.get("/api/timelapses")

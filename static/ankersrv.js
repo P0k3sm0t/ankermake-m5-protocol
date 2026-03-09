@@ -2831,6 +2831,96 @@ $(function () {
 
     let _filamentSortAsc = true;
     let _filamentAllProfiles = [];
+    let _filamentSwapToken = null;
+
+    function filamentFindProfileById(profileId) {
+        const id = parseInt(profileId, 10);
+        if (!Number.isFinite(id)) return null;
+        return _filamentAllProfiles.find(p => parseInt(p.id, 10) === id) || null;
+    }
+
+    function filamentServiceTemp(profile) {
+        if (!profile) return "";
+        return profile.nozzle_temp_other_layer ?? profile.nozzle_temp_first_layer ?? profile.nozzle_temp ?? "";
+    }
+
+    function filamentSetServiceStatus(message, level = "secondary") {
+        const statusEl = document.getElementById("filament-service-status");
+        if (!statusEl) return;
+        statusEl.className = `alert alert-${level} py-2 small mb-3`;
+        statusEl.textContent = message;
+    }
+
+    function filamentPopulateSelect(selectId, selectedValue = "") {
+        const select = document.getElementById(selectId);
+        if (!select) return;
+        const previous = String(selectedValue || select.value || "");
+        select.innerHTML = '<option value="">Select profile...</option>';
+        _filamentAllProfiles.forEach(p => {
+            const option = document.createElement("option");
+            option.value = String(p.id);
+            const temp = filamentServiceTemp(p);
+            option.textContent = temp ? `${p.name} (${temp}°C)` : p.name;
+            if (option.value === previous) option.selected = true;
+            select.appendChild(option);
+        });
+    }
+
+    function filamentSyncQuickServiceTemp() {
+        const profile = filamentFindProfileById(document.getElementById("filament-service-profile")?.value);
+        const tempEl = document.getElementById("filament-service-temp");
+        if (!tempEl) return;
+        tempEl.value = profile ? filamentServiceTemp(profile) : "";
+    }
+
+    function filamentUpdateSwapState(data) {
+        const stateEl = document.getElementById("filament-swap-state");
+        const confirmBtn = document.getElementById("filament-swap-confirm-btn");
+        const cancelBtn = document.getElementById("filament-swap-cancel-btn");
+        const swap = data && data.pending ? data.swap : null;
+
+        _filamentSwapToken = swap ? swap.token : null;
+
+        if (confirmBtn) confirmBtn.disabled = !swap;
+        if (cancelBtn) cancelBtn.disabled = !swap;
+
+        if (!stateEl) return;
+        if (!swap) {
+            stateEl.textContent = "No swap in progress.";
+            return;
+        }
+
+        stateEl.textContent =
+            `Pending swap: unload ${swap.unload_profile_name} (${swap.unload_length_mm} mm @ ${swap.unload_temp_c}°C), ` +
+            `then load ${swap.load_profile_name} (${swap.load_length_mm} mm @ ${swap.load_temp_c}°C).`;
+    }
+
+    async function filamentRefreshSwapState() {
+        try {
+            const resp = await fetch("/api/filaments/service/swap");
+            const data = await resp.json();
+            if (!resp.ok) {
+                filamentSetServiceStatus(data.error || `Failed to load swap state (HTTP ${resp.status})`, "danger");
+                return;
+            }
+            filamentUpdateSwapState(data);
+        } catch (err) {
+            filamentSetServiceStatus(`Failed to load swap state: ${err}`, "danger");
+        }
+    }
+
+    async function filamentServiceRequest(url, payload) {
+        const resp = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload || {}),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+            throw new Error(data.error || `HTTP ${resp.status}`);
+        }
+        return data;
+    }
 
     function _renderFilaments() {
         const tbody = document.getElementById("filaments-tbody");
@@ -2919,6 +3009,10 @@ $(function () {
             .then(r => r.json())
             .then(data => {
                 _filamentAllProfiles = data.filaments || [];
+                filamentPopulateSelect("filament-service-profile");
+                filamentPopulateSelect("filament-swap-unload-profile");
+                filamentPopulateSelect("filament-swap-load-profile");
+                filamentSyncQuickServiceTemp();
                 _renderFilaments();
             })
             .catch(err => console.error("Filaments load failed:", err));
@@ -2941,6 +3035,139 @@ $(function () {
     const filamentSearch = document.getElementById("filament-search");
     if (filamentSearch) {
         filamentSearch.addEventListener("input", function () { _renderFilaments(); });
+    }
+
+    const filamentServiceProfile = document.getElementById("filament-service-profile");
+    if (filamentServiceProfile) {
+        filamentServiceProfile.addEventListener("change", filamentSyncQuickServiceTemp);
+    }
+
+    const filamentServicePreheatBtn = document.getElementById("filament-service-preheat-btn");
+    if (filamentServicePreheatBtn) {
+        filamentServicePreheatBtn.addEventListener("click", async function () {
+            const profileId = document.getElementById("filament-service-profile")?.value;
+            if (!profileId) {
+                filamentSetServiceStatus("Select a filament profile first.", "warning");
+                return;
+            }
+            try {
+                const res = await filamentServiceRequest("/api/filaments/service/preheat", {
+                    profile_id: parseInt(profileId, 10),
+                });
+                filamentSetServiceStatus(
+                    `Preheating ${res.profile_name} to ${res.target_temp_c}°C.`,
+                    "warning"
+                );
+            } catch (err) {
+                filamentSetServiceStatus(`Preheat failed: ${err.message}`, "danger");
+            }
+        });
+    }
+
+    const filamentServiceExtrudeBtn = document.getElementById("filament-service-extrude-btn");
+    if (filamentServiceExtrudeBtn) {
+        filamentServiceExtrudeBtn.addEventListener("click", async function () {
+            const profileId = document.getElementById("filament-service-profile")?.value;
+            const lengthMm = parseFloat(document.getElementById("filament-service-length")?.value || "0");
+            if (!profileId) {
+                filamentSetServiceStatus("Select a filament profile first.", "warning");
+                return;
+            }
+            try {
+                const res = await filamentServiceRequest("/api/filaments/service/move", {
+                    profile_id: parseInt(profileId, 10),
+                    action: "extrude",
+                    length_mm: lengthMm,
+                });
+                filamentSetServiceStatus(
+                    `Extruding ${res.length_mm} mm with ${res.profile_name} at ${res.target_temp_c}°C.`,
+                    "success"
+                );
+            } catch (err) {
+                filamentSetServiceStatus(`Extrude failed: ${err.message}`, "danger");
+            }
+        });
+    }
+
+    const filamentServiceRetractBtn = document.getElementById("filament-service-retract-btn");
+    if (filamentServiceRetractBtn) {
+        filamentServiceRetractBtn.addEventListener("click", async function () {
+            const profileId = document.getElementById("filament-service-profile")?.value;
+            const lengthMm = parseFloat(document.getElementById("filament-service-length")?.value || "0");
+            if (!profileId) {
+                filamentSetServiceStatus("Select a filament profile first.", "warning");
+                return;
+            }
+            try {
+                const res = await filamentServiceRequest("/api/filaments/service/move", {
+                    profile_id: parseInt(profileId, 10),
+                    action: "retract",
+                    length_mm: lengthMm,
+                });
+                filamentSetServiceStatus(
+                    `Retracting ${res.length_mm} mm with ${res.profile_name} at ${res.target_temp_c}°C.`,
+                    "secondary"
+                );
+            } catch (err) {
+                filamentSetServiceStatus(`Retract failed: ${err.message}`, "danger");
+            }
+        });
+    }
+
+    const filamentSwapStartBtn = document.getElementById("filament-swap-start-btn");
+    if (filamentSwapStartBtn) {
+        filamentSwapStartBtn.addEventListener("click", async function () {
+            const unloadProfileId = parseInt(document.getElementById("filament-swap-unload-profile")?.value || "", 10);
+            const loadProfileId = parseInt(document.getElementById("filament-swap-load-profile")?.value || "", 10);
+            const unloadLengthMm = parseFloat(document.getElementById("filament-swap-unload-length")?.value || "0");
+            const loadLengthMm = parseFloat(document.getElementById("filament-swap-load-length")?.value || "0");
+            if (!Number.isFinite(unloadProfileId) || !Number.isFinite(loadProfileId)) {
+                filamentSetServiceStatus("Select unload and load profiles first.", "warning");
+                return;
+            }
+            try {
+                const res = await filamentServiceRequest("/api/filaments/service/swap/start", {
+                    unload_profile_id: unloadProfileId,
+                    load_profile_id: loadProfileId,
+                    unload_length_mm: unloadLengthMm,
+                    load_length_mm: loadLengthMm,
+                });
+                filamentUpdateSwapState(res);
+                filamentSetServiceStatus(res.message, "primary");
+            } catch (err) {
+                filamentSetServiceStatus(`Swap start failed: ${err.message}`, "danger");
+            }
+        });
+    }
+
+    const filamentSwapConfirmBtn = document.getElementById("filament-swap-confirm-btn");
+    if (filamentSwapConfirmBtn) {
+        filamentSwapConfirmBtn.addEventListener("click", async function () {
+            try {
+                const res = await filamentServiceRequest("/api/filaments/service/swap/confirm", {
+                    token: _filamentSwapToken,
+                });
+                filamentUpdateSwapState(res);
+                filamentSetServiceStatus(res.message, "success");
+            } catch (err) {
+                filamentSetServiceStatus(`Swap confirm failed: ${err.message}`, "danger");
+            }
+        });
+    }
+
+    const filamentSwapCancelBtn = document.getElementById("filament-swap-cancel-btn");
+    if (filamentSwapCancelBtn) {
+        filamentSwapCancelBtn.addEventListener("click", async function () {
+            try {
+                const res = await filamentServiceRequest("/api/filaments/service/swap/cancel", {
+                    token: _filamentSwapToken,
+                });
+                filamentUpdateSwapState(res);
+                filamentSetServiceStatus(res.message || "Filament swap cancelled.", "secondary");
+            } catch (err) {
+                filamentSetServiceStatus(`Swap cancel failed: ${err.message}`, "danger");
+            }
+        });
     }
 
     // Save button: create or update
@@ -2996,6 +3223,7 @@ $(function () {
     if (filamentsTabBtn) {
         filamentsTabBtn.addEventListener("shown.bs.tab", function () {
             loadFilaments();
+            filamentRefreshSwapState();
         });
     }
 

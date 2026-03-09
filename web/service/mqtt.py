@@ -46,6 +46,10 @@ class MqttQueue(Service):
         self._reset_print_state()
         self._gcode_layer_count = None  # Override from GCode header, survives print resets
         self._last_message_time = 0.0
+        self._nozzle_temp = None
+        self._nozzle_temp_target = None
+        self._bed_temp = None
+        self._bed_temp_target = None
 
     def set_gcode_layer_count(self, count: int):
         """Store the layer count extracted from a GCode header for UI display."""
@@ -97,6 +101,17 @@ class MqttQueue(Service):
     def last_message_time(self):
         return self._last_message_time
 
+    @property
+    def nozzle_temp(self):
+        return self._nozzle_temp
+
+    @property
+    def nozzle_temp_target(self):
+        return self._nozzle_temp_target
+
+    def request_status(self):
+        self._send_status_query()
+
     def worker_run(self, timeout):
         # Poll status every 10 seconds if idle
         now = time.time()
@@ -145,6 +160,13 @@ class MqttQueue(Service):
             return int(float(value))
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _normalize_temp(value):
+        temp = MqttQueue._safe_int(value)
+        if temp is None:
+            return None
+        return temp // 100 if temp > 1000 else temp
 
     @staticmethod
     def _normalize_progress(value, max_value=None):
@@ -279,18 +301,22 @@ class MqttQueue(Service):
             target = self._safe_int(payload.get("targetTemp") or payload.get("target"))
             if current is not None:
                 # Temps may come in 1/100th degree units
-                ha_updates["nozzle_temp"] = current // 100 if current > 1000 else current
+                self._nozzle_temp = self._normalize_temp(current)
+                ha_updates["nozzle_temp"] = self._nozzle_temp
             if target is not None:
-                ha_updates["nozzle_temp_target"] = target // 100 if target > 1000 else target
+                self._nozzle_temp_target = self._normalize_temp(target)
+                ha_updates["nozzle_temp_target"] = self._nozzle_temp_target
 
         # Bed temperature (command 1004 = 0x03ec)
         elif command_type == MqttMsgType.ZZ_MQTT_CMD_HOTBED_TEMP:
             current = self._safe_int(payload.get("currentTemp") or payload.get("value"))
             target = self._safe_int(payload.get("targetTemp") or payload.get("target"))
             if current is not None:
-                ha_updates["bed_temp"] = current // 100 if current > 1000 else current
+                self._bed_temp = self._normalize_temp(current)
+                ha_updates["bed_temp"] = self._bed_temp
             if target is not None:
-                ha_updates["bed_temp_target"] = target // 100 if target > 1000 else target
+                self._bed_temp_target = self._normalize_temp(target)
+                ha_updates["bed_temp_target"] = self._bed_temp_target
 
         # Print speed (command 1006 = 0x03ee)
         elif command_type == MqttMsgType.ZZ_MQTT_CMD_PRINT_SPEED:
@@ -603,6 +629,12 @@ class MqttQueue(Service):
                 "last_task_id": self._last_task_id,
                 "failure_sent": self._failure_sent,
                 "preview_url": self._preview_url,
+            },
+            "temperature": {
+                "nozzle": self._nozzle_temp,
+                "nozzle_target": self._nozzle_temp_target,
+                "bed": self._bed_temp,
+                "bed_target": self._bed_temp_target,
             },
             "debug_logging": getattr(self, "_debug_log_payloads", False),
             "timelapse": {
