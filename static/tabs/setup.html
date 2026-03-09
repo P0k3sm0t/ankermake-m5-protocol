@@ -195,10 +195,13 @@
                                                 </select>
                                                 {% if upload_rate_env %}
                                                 <div class="form-text text-warning">
-                                                    Env override active: UPLOAD_RATE_MBPS={{ upload_rate_env }}
+                                                    Effective rate is forced by environment:
+                                                    <code>UPLOAD_RATE_MBPS={{ upload_rate_env }}</code>.
+                                                    Saved config value is
+                                                    <code>{{ upload_rate_config }} Mbps</code>.
                                                 </div>
                                                 {% else %}
-                                                <div class="form-text">Persisted in config; env can override.</div>
+                                                <div class="form-text">Effective rate: <code>{{ upload_rate_mbps }} Mbps</code> from {{ upload_rate_source }}.</div>
                                                 {% endif %}
                                             </div>
                                         </div>

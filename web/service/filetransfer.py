@@ -96,14 +96,14 @@ class FileTransferService(Service):
             )
             if start_print:
                 log.info("File upload complete. Requesting print start of job.")
-                api.aabb_request(b"", frametype=FileTransfer.END)
+                api.aabb_request(b"", frametype=FileTransfer.END, timeout=15.0)
             else:
                 log.info("File upload complete (upload-only)")
         except ConnectionError as e:
             log.error(f"Could not send print job: {e}")
             self._notify_upload({"status": "error", "name": upload_name, "error": str(e)})
             raise
-        except (PPPPError, OSError, EOFError) as e:
+        except (PPPPError, OSError, EOFError, TimeoutError) as e:
             log.error(f"Could not send print job: {e}")
             self._notify_upload({"status": "error", "name": upload_name, "error": str(e)})
             raise ConnectionError(f"PPPP transfer failed: {e}") from e

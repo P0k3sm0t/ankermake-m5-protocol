@@ -415,7 +415,8 @@ def app_root():
             anker_config = str(web.config.config_show(cfg))
             config_existing_email = cfg.account.email
             printer = cfg.printers[app.config["printer_index"]]
-            upload_rate_mbps = getattr(cfg, "upload_rate_mbps", None)
+            upload_rate_mbps, upload_rate_source = cli.util.resolve_upload_rate_mbps_with_source(cfg)
+            upload_rate_config = getattr(cfg, "upload_rate_mbps", None)
             country = cfg.account.country
             for i, p in enumerate(cfg.printers):
                 printers_list.append({
@@ -430,6 +431,8 @@ def app_root():
             config_existing_email = ""
             printer = None
             upload_rate_mbps = None
+            upload_rate_config = None
+            upload_rate_source = None
             country = ""
 
         if ":" in request.host:
@@ -450,6 +453,8 @@ def app_root():
             current_country=country,
             video_supported=app.config.get("video_supported", False),
             upload_rate_mbps=upload_rate_mbps,
+            upload_rate_config=upload_rate_config,
+            upload_rate_source=upload_rate_source,
             upload_rate_env=os.getenv("UPLOAD_RATE_MBPS"),
             upload_rate_choices=UPLOAD_RATE_MBPS_CHOICES,
             printer=printer,
@@ -677,7 +682,7 @@ def app_api_files_local():
 
     fd = request.files["file"]
     with app.config["config"].open() as cfg:
-        rate_limit_mbps = cli.util.resolve_upload_rate_mbps(cfg)
+        rate_limit_mbps, rate_limit_source = cli.util.resolve_upload_rate_mbps_with_source(cfg)
 
     with app.svc.borrow("filetransfer") as ft:
         try:
@@ -693,7 +698,11 @@ def app_api_files_local():
                 "Please verify that printer is online, and on the same network as ankerctl."
             )
 
-    return {}
+    return {
+        "status": "ok",
+        "upload_rate_mbps": rate_limit_mbps,
+        "upload_rate_source": rate_limit_source,
+    }
 
 
 @app.post("/api/ankerctl/config/upload-rate")
@@ -715,7 +724,15 @@ def app_api_ankerctl_config_upload_rate():
             return {"error": "No printers configured"}, 400
         cfg.upload_rate_mbps = rate_limit_mbps
 
-    return {"status": "ok", "upload_rate_mbps": rate_limit_mbps}
+    with config.open() as cfg:
+        effective_rate_mbps, effective_rate_source = cli.util.resolve_upload_rate_mbps_with_source(cfg)
+
+    return {
+        "status": "ok",
+        "upload_rate_mbps": rate_limit_mbps,
+        "effective_upload_rate_mbps": effective_rate_mbps,
+        "effective_upload_rate_source": effective_rate_source,
+    }
 
 
 @app.get("/api/notifications/settings")
@@ -885,14 +902,18 @@ def app_api_printer_gcode():
     if not isinstance(gcode, str):
         return {"error": "gcode must be a string"}, 400
 
-    lines = [line.strip() for line in gcode.split('\n') if line.strip()]
+    lines = cli.util.normalize_gcode_lines(gcode)
+    if not lines:
+        return {"error": "No executable gcode lines found"}, 400
+
+    normalized_gcode = "\n".join(lines)
 
     with app.svc.borrow("mqttqueue") as mqtt:
         if mqtt.is_printing:
             unsafe = [l for l in lines if l.split()[0].upper() in _UNSAFE_GCODE_PREFIXES]
             if unsafe:
                 return {"error": "Motion commands blocked while printing"}, 409
-        mqtt.send_gcode(gcode)
+        mqtt.send_gcode(normalized_gcode)
 
     return {"status": "ok"}
 

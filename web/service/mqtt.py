@@ -696,7 +696,7 @@ class MqttQueue(Service):
         if not gcode:
             return
 
-        lines = [line.strip() for line in gcode.split('\n') if line.strip()]
+        lines = cli.util.normalize_gcode_lines(gcode)
         for line in lines:
             cmd = {
                 "commandType": MqttMsgType.ZZ_MQTT_CMD_GCODE_COMMAND.value,

@@ -16,11 +16,11 @@
                                 <div class="input-group">
                                     <input type="file" class="form-control" id="gcode-file" accept=".gcode,.gco,.g">
                                     <button class="btn btn-primary" id="gcode-file-send" type="button">
-                                        {{ macro.bi_icon("send") }} Send
+                                        {{ macro.bi_icon("upload") }} Upload & Print
                                     </button>
                                 </div>
-                                <div class="form-text">Upload a .gcode file to send commands line-by-line to the
-                                    printer.</div>
+                                <div class="form-text">Upload a <code>.gcode</code> file as a print job via the same file-transfer
+                                    path used by slicers.</div>
                             </div>
                         </div>
                         <!-- Custom GCode (secondary, collapsible) -->
@@ -38,6 +38,8 @@
                                             {{ macro.bi_icon("send") }} Send
                                         </button>
                                     </div>
+                                    <div class="form-text">For raw commands or short macros. If you paste a full
+                                        slicer-generated job, it will be uploaded as a print file instead.</div>
                                 </div>
                             </div>
                         </div>

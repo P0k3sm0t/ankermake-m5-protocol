@@ -127,14 +127,34 @@ def _pppp_send_file_handshake(api, fui, reply_timeout=2.0):
             api.send_xzyh(file_uuid[:16].encode(), cmd=P2PCmdType.P2P_SEND_FILE)
 
 
+def _retry_file_transfer_data(api, chunk, pos, reply_timeout, retries=2):
+    attempts = retries + 1
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return api.aabb_request(chunk, frametype=FileTransfer.DATA, pos=pos, timeout=reply_timeout)
+        except TimeoutError as exc:
+            is_drw_timeout = "PPPP DRW ACK" in str(exc)
+            if not is_drw_timeout or attempt >= attempts:
+                raise
+
+            log.warning(
+                f"Retrying file transfer chunk at pos {pos} after transport timeout "
+                f"(attempt {attempt + 1}/{attempts})"
+            )
+            api.reset_chan_tx(chan=1)
+
+
 def pppp_send_file(api, fui, data, rate_limit_mbps=None, progress_cb=None, show_progress=True):
+    reply_timeout = 15.0
+
     _pppp_send_file_handshake(api, fui)
 
     log.info("Sending file metadata..")
-    api.aabb_request(bytes(fui), frametype=FileTransfer.BEGIN)
+    api.aabb_request(bytes(fui), frametype=FileTransfer.BEGIN, timeout=reply_timeout)
 
     log.info("Sending file contents..")
-    blocksize = 1024 * 128
+    blocksize = 1024 * 32
     chunks = cli.util.split_chunks(data, blocksize)
     pos = 0
     total = len(data)
@@ -153,7 +173,7 @@ def pppp_send_file(api, fui, data, rate_limit_mbps=None, progress_cb=None, show_
         disable=not show_progress,
     ) as bar:
         for chunk in chunks:
-            api.aabb_request(chunk, frametype=FileTransfer.DATA, pos=pos)
+            _retry_file_transfer_data(api, chunk, pos, reply_timeout)
             pos += len(chunk)
             if limiter:
                 limiter.throttle(len(chunk))

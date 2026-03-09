@@ -192,7 +192,7 @@ class Channel:
     def read(self, nbytes, timeout=None):
         return self.rx.read(nbytes, timeout)
 
-    def write(self, payload, block=True):
+    def write(self, payload, block=True, timeout=None):
         pdata = payload[:]
 
         tx_ctr_start = self.tx_ctr
@@ -207,15 +207,34 @@ class Channel:
 
         tx_ctr_done = self.tx_ctr
 
+        deadline = None
+        if block and timeout is not None:
+            deadline = datetime.now() + timedelta(seconds=timeout)
+
         while block:
             # if doing a blocking write, loop on self.event until we have
             # received acknowledgment of our data
-            self.wait()
+            if deadline is not None:
+                remaining = (deadline - datetime.now()).total_seconds()
+                if remaining <= 0:
+                    raise TimeoutError("Timed out waiting for PPPP DRW ACK")
+                self.event.wait(timeout=min(remaining, 0.5))
+                self.event.clear()
+            else:
+                self.wait()
 
             if self.tx_ack >= tx_ctr_done:
                 break
 
         return (tx_ctr_start, tx_ctr_done)
+
+    def reset_tx(self):
+        with self.lock:
+            self.txqueue.clear()
+            self.backlog.clear()
+            self.acks.clear()
+            self.tx_ack = self.tx_ctr
+            self.event.set()
 
 
 class PPPPState(Enum):
@@ -372,7 +391,7 @@ class AnkerPPPPBaseApi(Thread):
         log.debug(f"TX  --> {str(msg)[:128]}")
         self.sock.sendto(resp, addr or self.addr)
 
-    def send_xzyh(self, data, cmd, chan=0, unk0=0, unk1=0, sign_code=0, unk3=0, dev_type=0, block=True):
+    def send_xzyh(self, data, cmd, chan=0, unk0=0, unk1=0, sign_code=0, unk3=0, dev_type=0, block=True, timeout=None):
         xzyh = Xzyh(
             cmd=cmd,
             len=len(data),
@@ -385,9 +404,9 @@ class AnkerPPPPBaseApi(Thread):
             dev_type=dev_type
         )
 
-        return self.chans[chan].write(xzyh.pack(), block=block)
+        return self.chans[chan].write(xzyh.pack(), block=block, timeout=timeout)
 
-    def send_aabb(self, data, sn=0, pos=0, frametype=0, chan=1, block=True):
+    def send_aabb(self, data, sn=0, pos=0, frametype=0, chan=1, block=True, timeout=None):
         aabb = Aabb(
             frametype=frametype,
             sn=sn,
@@ -395,7 +414,10 @@ class AnkerPPPPBaseApi(Thread):
             len=len(data)
         )
 
-        return self.chans[chan].write(aabb.pack_with_crc(data), block=block)
+        return self.chans[chan].write(aabb.pack_with_crc(data), block=block, timeout=timeout)
+
+    def reset_chan_tx(self, chan=1):
+        self.chans[chan].reset_tx()
 
 
 class AnkerPPPPApi(AnkerPPPPBaseApi):
@@ -421,18 +443,23 @@ class AnkerPPPPApi(AnkerPPPPBaseApi):
             xzyh.data = data[16:]
             return xzyh
 
-    def recv_aabb(self, chan=1):
+    def recv_aabb(self, chan=1, timeout=None):
         fd = self.chans[chan]
 
         with fd.lock:
-            data = fd.read(12)
+            data = fd.read(12, timeout=timeout)
+            if not data:
+                raise TimeoutError("Timed out waiting for AABB header")
             aabb = Aabb.parse(data)[0]
-            p = data + fd.read(aabb.len + 2)
+            tail = fd.read(aabb.len + 2, timeout=timeout)
+            if not tail:
+                raise TimeoutError("Timed out waiting for AABB payload")
+            p = data + tail
             aabb, data = Aabb.parse_with_crc(p)[:2]
         return aabb, data
 
-    def recv_aabb_reply(self, chan=1, check=True):
-        aabb, data = self.recv_aabb(chan=chan)
+    def recv_aabb_reply(self, chan=1, check=True, timeout=None):
+        aabb, data = self.recv_aabb(chan=chan, timeout=timeout)
         if len(data) != 1:
             raise ValueError(f"Unexpected reply from aabb request: {data}")
 
@@ -442,9 +469,9 @@ class AnkerPPPPApi(AnkerPPPPBaseApi):
 
         return res
 
-    def aabb_request(self, data, frametype, pos=0, chan=1, check=True):
-        self.send_aabb(data=data, frametype=frametype, chan=chan, pos=pos)
-        return self.recv_aabb_reply(chan, check)
+    def aabb_request(self, data, frametype, pos=0, chan=1, check=True, timeout=None):
+        self.send_aabb(data=data, frametype=frametype, chan=chan, pos=pos, timeout=timeout)
+        return self.recv_aabb_reply(chan, check, timeout=timeout)
 
 
 class AnkerPPPPAsyncApi(AnkerPPPPBaseApi):

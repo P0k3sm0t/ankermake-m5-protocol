@@ -160,21 +160,38 @@ def _parse_upload_rate_mbps(value):
 
 
 def resolve_upload_rate_mbps(config=None, override=None, env_var="UPLOAD_RATE_MBPS"):
+    return resolve_upload_rate_mbps_with_source(config=config, override=override, env_var=env_var)[0]
+
+
+def resolve_upload_rate_mbps_with_source(config=None, override=None, env_var="UPLOAD_RATE_MBPS"):
     if override is not None:
         rate = _parse_upload_rate_mbps(override)
         if rate is None:
             raise ValueError(f"Unsupported upload rate: {override}")
-        return rate
+        return rate, "override"
 
     env_value = os.getenv(env_var)
     env_rate = _parse_upload_rate_mbps(env_value)
     if env_value is not None and env_rate is None:
         log.warning(f"Ignoring unsupported {env_var}={env_value!r}")
     if env_rate is not None:
-        return env_rate
+        return env_rate, "env"
     if config is not None and hasattr(config, "upload_rate_mbps"):
-        return config.upload_rate_mbps
-    return DEFAULT_UPLOAD_RATE_MBPS
+        return config.upload_rate_mbps, "config"
+    return DEFAULT_UPLOAD_RATE_MBPS, "default"
+
+
+def normalize_gcode_lines(gcode: str) -> list[str]:
+    """Return executable GCode lines without comments or blank lines."""
+    if not isinstance(gcode, str):
+        raise TypeError("gcode must be a string")
+
+    lines = []
+    for raw_line in gcode.splitlines():
+        line = raw_line.split(";", 1)[0].strip()
+        if line:
+            lines.append(line)
+    return lines
 
 
 _TIME_PATTERN = re.compile(r";\s*estimated printing time[^=]*=\s*(.*)", re.IGNORECASE)

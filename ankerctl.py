@@ -333,8 +333,8 @@ def pppp_print_file(env, file, no_act, upload_rate_mbps):
             log.info("File upload complete")
         else:
             log.info("File upload complete. Requesting print start of job.")
-            api.aabb_request(b"", frametype=FileTransfer.END)
-    except PPPPError as E:
+            api.aabb_request(b"", frametype=FileTransfer.END, timeout=15.0)
+    except (PPPPError, TimeoutError) as E:
         log.error(f"Could not send print job: {E}")
     else:
         if not no_act:
