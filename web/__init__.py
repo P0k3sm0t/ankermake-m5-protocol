@@ -710,7 +710,7 @@ def app_api_ankerctl_config_upload():
         web.config.config_import(file, app.config["config"])
         session["authenticated"] = True
         return web.util.flash_redirect(url_for('app_api_ankerctl_server_reload'),
-                                       "AnkerMake Config Imported!", "success")
+                                       "Configuration imported!", "success")
     except web.config.ConfigImportError as err:
         log.exception(f"Config import failed: {err}")
         return web.util.flash_redirect(url_for('app_root'), "Config import failed. Check server logs for details.", "danger")
@@ -739,7 +739,7 @@ def app_api_ankerctl_config_login():
             form_data.get('login_captcha_text', ''),
             app.config["config"],
         )
-        flash("AnkerMake Config Imported!", "success")
+        flash("Configuration imported!", "success")
         session["authenticated"] = True
         return jsonify({"redirect": url_for('app_api_ankerctl_server_reload')})
     except web.config.ConfigImportError as err:
