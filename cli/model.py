@@ -2,6 +2,7 @@ import json
 import os
 from datetime import datetime
 from dataclasses import dataclass, field
+from platformdirs import PlatformDirs
 from libflagship.util import unhex, enhex
 
 
@@ -50,7 +51,10 @@ def default_timelapse_config():
         "interval": int(os.getenv("TIMELAPSE_INTERVAL_SEC", 30)),
         "max_videos": int(os.getenv("TIMELAPSE_MAX_VIDEOS", 10)),
         "save_persistent": os.getenv("TIMELAPSE_SAVE_PERSISTENT", "true").lower() in ("true", "1", "yes"),
-        "output_dir": os.getenv("TIMELAPSE_CAPTURES_DIR", "/captures"),
+        "output_dir": os.getenv(
+            "TIMELAPSE_CAPTURES_DIR",
+            os.path.join(str(PlatformDirs("ankerctl").user_config_path), "captures"),
+        ),
         "light": os.getenv("TIMELAPSE_LIGHT", None),
     }
 
