@@ -1,7 +1,7 @@
 import json
 import os
 from datetime import datetime
-from dataclasses import dataclass, field
+from dataclasses import MISSING, dataclass, field
 from platformdirs import PlatformDirs
 from libflagship.util import unhex, enhex
 
@@ -95,11 +95,21 @@ class Serialize:
     def from_dict(cls, data):
         res = {}
         for k, v in cls.__dataclass_fields__.items():
-            res[k] = data[k]
-            if v.type == bytes:
-                res[k] = unhex(res[k])
-            elif v.type == datetime:
-                res[k] = datetime.fromtimestamp(res[k])
+            if k in data:
+                value = data[k]
+            elif v.default is not MISSING:
+                value = v.default
+            elif v.default_factory is not MISSING:
+                value = v.default_factory()
+            else:
+                raise KeyError(k)
+
+            if v.type == bytes and isinstance(value, str):
+                value = unhex(value)
+            elif v.type == datetime and not isinstance(value, datetime):
+                value = datetime.fromtimestamp(value)
+
+            res[k] = value
         return cls(**res)
 
     def to_dict(self):
@@ -131,16 +141,28 @@ class Printer(Serialize):
     wifi_mac: str
     ip_addr: str
     mqtt_key: bytes
-    api_hosts: str
-    p2p_hosts: str
+    api_hosts: list[str]
+    p2p_hosts: list[str]
     p2p_duid: str
     p2p_key: str
-    p2p_did: str = "" # Added field just in case, but keeping original structure
+    p2p_did: str = ""
 
     @classmethod
     def from_dict(cls, data):
-         # If new fields added to printer, verify here.
-         return super().from_dict(data)
+        data = dict(data)
+
+        p2p_duid = data.get("p2p_duid") or data.get("p2p_did", "")
+        data["p2p_duid"] = p2p_duid
+        data["p2p_did"] = data.get("p2p_did") or p2p_duid
+
+        for key in ("api_hosts", "p2p_hosts"):
+            hosts = data.get(key)
+            if hosts is None:
+                data[key] = []
+            elif isinstance(hosts, str):
+                data[key] = [hosts] if hosts else []
+
+        return super().from_dict(data)
 
 
 @dataclass
