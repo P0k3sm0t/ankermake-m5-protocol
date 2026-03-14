@@ -27,21 +27,31 @@ def probe_pppp(config, printer_index) -> bool:
 
         deadline = datetime.now() + timedelta(seconds=5)
         api = AnkerPPPPAsyncApi.open_lan(Duid.from_string(printer.p2p_duid), host=ip_addr)
-        api.connect_lan_search()
+        try:
+            api.connect_lan_search()
 
-        while api.state != PPPPState.Connected:
-            remaining = (deadline - datetime.now()).total_seconds()
-            if remaining <= 0:
-                return False
+            while api.state != PPPPState.Connected:
+                remaining = (deadline - datetime.now()).total_seconds()
+                if remaining <= 0:
+                    return False
+                try:
+                    msg = api.recv(timeout=remaining)
+                    api.process(msg)
+                except (TimeoutError, ConnectionResetError):
+                    return False
+
             try:
-                msg = api.recv(timeout=remaining)
-                api.process(msg)
-            except StopIteration:
-                return False
-
-        api.send(PktClose())
-        return True
-    except Exception:
+                api.send(PktClose())
+            except Exception:
+                pass
+            return True
+        finally:
+            try:
+                api.sock.close()
+            except Exception:
+                pass
+    except Exception as e:
+        log.debug(f"PPPP probe failed unexpectedly: {e}")
         return False
 
 
@@ -101,7 +111,7 @@ class PPPPService(Service):
             try:
                 msg = api.recv(timeout=remaining)
                 api.process(msg)
-            except StopIteration:
+            except ConnectionResetError:
                 raise ConnectionRefusedError("Connection rejected by device")
 
         log.info("Established pppp connection")
