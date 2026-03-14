@@ -2,9 +2,9 @@
 
 ## login.json pre-requisites for Linux Install
 
-### AnkerMake Slicer installed on another Machine
+### eufyMake Studio installed on another Machine
 
-1. Install the [AnkerMake slicer](https://www.ankermake.com/software) on a supported Operating System.  Make sure you open it and login via the “Account” dropdown in the top toolbar.
+1. Install [eufyMake Studio](https://www.eufymake.com/software) on a supported Operating System.  Make sure you open it and login via the “Account” dropdown in the top toolbar.
 
 2. Retreive the ```login.json``` file (Windows: ```user_info```) from the supported operating system:
 
@@ -24,7 +24,7 @@
 
 ### Native Linux
 
-1. Install the [AnkerMake slicer](https://www.ankermake.com/software) on Linux via emulation such as Wine.  Make sure you open it and login via the “Account” dropdown in the top toolbar.
+1. Install [eufyMake Studio](https://www.eufymake.com/software) on Linux via emulation such as Wine.  Make sure you open it and login via the “Account” dropdown in the top toolbar.
    
 2. Retreive the ```login.json``` file (Windows: ```user_info```) ```~/.wine/drive_c/users/$USER/AppData/Roaming/eufyMake Studio Profile/cache/offline/user_info```
 
