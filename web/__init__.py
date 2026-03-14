@@ -324,12 +324,13 @@ def _set_printer_z_offset(mqtt, target_mm, current=None):
         after_seq=current["seq"],
         timeout=Z_OFFSET_CONFIRM_TIMEOUT_S,
     )
+    mqtt.send_gcode("M500")
 
     return {
         "status": "ok",
         "message": (
             f"Z-offset moved from {current_mm:.2f} mm to {confirmed['mm']:.2f} mm "
-            f"via M290 Z{_format_signed_mm(delta_mm)}."
+            f"via M290 Z{_format_signed_mm(delta_mm)} and saved with M500."
         ),
         "changed": True,
         "current": _serialize_z_offset_state(current),
