@@ -90,7 +90,7 @@ The CLI is run via `ankerctl.py`.
 ## Configuration
 
 *   **Storage:** Configuration is stored in a `default.json` file managed by `ankerctl`.
-*   **Import:** Configuration is typically imported from the official AnkerMake Slicer's `login.json` or `user_info` file.
+*   **Import:** Configuration is typically imported from the official eufyMake Studio's (formerly AnkerMake Slicer) `login.json` or `user_info` file.
 *   **CLI Config:** `cli/config.py` handles loading and saving configuration.
 
 ## Key Files & Directories
