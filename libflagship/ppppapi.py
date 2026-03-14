@@ -54,7 +54,8 @@ class FileUploadInfo:
 
     @classmethod
     def from_file(cls, filename, user_name, user_id, machine_id, type=0):
-        data = open(filename, "rb").read()
+        with open(filename, "rb") as f:
+            data = f.read()
         return cls.from_data(data, filename, user_name, user_id, machine_id, type=0)
 
     @classmethod
