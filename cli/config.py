@@ -213,7 +213,7 @@ def import_config_from_server(config, login_data, insecure):
         cfg = load_config_from_api(auth_token, region, insecure)
     except APIError as err:
         log.critical(f"Config import failed: {err} "
-                     "(auth token might be expired: make sure Ankermake Slicer can connect, then try again)")
+                     "(auth token might be expired: try 'ankerctl config login' to refresh)")
         raise
     except Exception as err:
         log.critical(f"Config import failed: {err}")

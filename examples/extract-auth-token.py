@@ -21,7 +21,7 @@ def parse_args():
 
     parser = argparse.ArgumentParser(
         prog="extract-auth-token",
-        description="Extract auth token from ankermake slicer login.json",
+        description="Extract auth token from eufyMake Studio / AnkerMake Slicer login.json",
         formatter_class=fmt
     )
 

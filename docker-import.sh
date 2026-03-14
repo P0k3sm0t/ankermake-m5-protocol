@@ -9,7 +9,7 @@ elif [ $# -eq 1 ]; then
 else
     echo "usage: $0 [container-name]"
     echo ""
-    echo "  Attempt to auto-import AnkerMake Slicer credentials"
+    echo "  Attempt to auto-import eufyMake Studio / AnkerMake Slicer credentials"
     echo "  ('login.json') into the specified docker container."
     echo ""
     echo "  Container name default to 'ankerctl' if unspecified."

@@ -25,7 +25,7 @@ def load(data, key=cachekey):
     try:
         raw = decrypt(data, key)
     except Exception:
-        # older versions of the Ankermake slicer just save unencrypted login
+        # older versions of AnkerMake Slicer (now eufyMake Studio) saved unencrypted login
         # credentials in login, so attempt to decode the file contents as-is
         raw = data
 
