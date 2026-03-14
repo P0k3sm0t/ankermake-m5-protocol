@@ -1,5 +1,6 @@
 import logging
 import os
+import threading
 import time
 
 from ..lib.service import Service
@@ -50,6 +51,10 @@ class MqttQueue(Service):
         self._nozzle_temp_target = None
         self._bed_temp = None
         self._bed_temp_target = None
+        self._z_offset_steps = None
+        self._z_offset_updated_at = 0.0
+        self._z_offset_seq = 0
+        self._z_offset_cond = threading.Condition()
 
     def set_gcode_layer_count(self, count: int):
         """Store the layer count extracted from a GCode header for UI display."""
@@ -109,8 +114,112 @@ class MqttQueue(Service):
     def nozzle_temp_target(self):
         return self._nozzle_temp_target
 
+    @property
+    def z_offset_steps(self):
+        return self._z_offset_steps
+
+    @property
+    def z_offset_mm(self):
+        if self._z_offset_steps is None:
+            return None
+        return round(self._z_offset_steps / 100.0, 2)
+
     def request_status(self):
         self._send_status_query()
+
+    @staticmethod
+    def _extract_z_offset_steps(payload):
+        if not isinstance(payload, dict):
+            return None
+        for key in ("value", "zAxisRecoup", "z_axis_recoup", "zOffset", "z_offset"):
+            steps = MqttQueue._safe_int(payload.get(key))
+            if steps is not None:
+                return steps
+        return None
+
+    def _handle_z_offset_update(self, payload):
+        if not isinstance(payload, dict):
+            return
+        if payload.get("commandType") != MqttMsgType.ZZ_MQTT_CMD_Z_AXIS_RECOUP.value:
+            return
+
+        steps = self._extract_z_offset_steps(payload)
+        if steps is None:
+            return
+
+        with self._z_offset_cond:
+            self._z_offset_steps = steps
+            self._z_offset_updated_at = time.time()
+            self._z_offset_seq += 1
+            self._z_offset_cond.notify_all()
+
+    def _z_offset_state(self, *, source="cached"):
+        return {
+            "available": self._z_offset_steps is not None,
+            "steps": self._z_offset_steps,
+            "mm": self.z_offset_mm,
+            "updated_at": self._z_offset_updated_at or None,
+            "source": source,
+        }
+
+    def get_z_offset_state(self):
+        with self._z_offset_cond:
+            return self._z_offset_state()
+
+    def wait_for_z_offset_update(self, *, after_seq=None, timeout=5.0):
+        deadline = time.monotonic() + timeout
+        with self._z_offset_cond:
+            while True:
+                if self._z_offset_steps is not None and (
+                    after_seq is None or self._z_offset_seq > after_seq
+                ):
+                    state = self._z_offset_state(source="live")
+                    state["seq"] = self._z_offset_seq
+                    return state
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("Timed out waiting for MQTT 1021 Z-offset update")
+                self._z_offset_cond.wait(timeout=remaining)
+
+    def refresh_z_offset(self, timeout=5.0):
+        with self._z_offset_cond:
+            seq = self._z_offset_seq
+        self._send_status_query()
+        return self.wait_for_z_offset_update(after_seq=seq, timeout=timeout)
+
+    def wait_for_z_offset_target(self, target_steps, *, after_seq=None, timeout=8.0):
+        deadline = time.monotonic() + timeout
+        next_query = 0.0
+
+        while True:
+            with self._z_offset_cond:
+                if self._z_offset_steps == target_steps and (
+                    after_seq is None or self._z_offset_seq > after_seq
+                ):
+                    state = self._z_offset_state(source="confirmed")
+                    state["seq"] = self._z_offset_seq
+                    return state
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+
+                self._z_offset_cond.wait(timeout=min(remaining, 0.5))
+
+            now = time.monotonic()
+            if now >= next_query:
+                self._send_status_query()
+                next_query = now + 1.0
+
+        current = self.get_z_offset_state()
+        current_steps = current.get("steps")
+        current_mm = current.get("mm")
+        current_text = f"{current_mm:.2f}" if current_mm is not None else "unknown"
+        raise TimeoutError(
+            f"Timed out waiting for MQTT 1021 to confirm {target_steps / 100.0:.2f} mm "
+            f"(last seen: {current_text} mm / {current_steps} steps)"
+        )
 
     def worker_run(self, timeout):
         # Poll status every 10 seconds if idle
@@ -128,6 +237,7 @@ class MqttQueue(Service):
                 log.info(f"DEBUG MQTT PAYLOAD: {json.dumps(body, default=str)}")
 
             for obj in body:
+                self._handle_z_offset_update(obj)
                 # Override total_layer with GCode header value when available
                 if (
                     isinstance(obj, dict)
@@ -636,6 +746,7 @@ class MqttQueue(Service):
                 "bed": self._bed_temp,
                 "bed_target": self._bed_temp_target,
             },
+            "z_offset": self.get_z_offset_state(),
             "debug_logging": getattr(self, "_debug_log_payloads", False),
             "timelapse": {
                 "enabled": getattr(self._timelapse, "enabled", None),

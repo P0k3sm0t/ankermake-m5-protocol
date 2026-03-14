@@ -29,6 +29,7 @@ Services:
 """
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -128,6 +129,9 @@ FILAMENT_SERVICE_FEEDRATE_MM_MIN = 240
 FILAMENT_SERVICE_HEAT_TIMEOUT_S = 240.0
 FILAMENT_SERVICE_HEAT_POLL_S = 0.5
 FILAMENT_SERVICE_HEAT_TOLERANCE_C = 5
+Z_OFFSET_STEP_MM = 0.01
+Z_OFFSET_REFRESH_TIMEOUT_S = 5.0
+Z_OFFSET_CONFIRM_TIMEOUT_S = 8.0
 
 
 def _filament_service_temp(profile):
@@ -247,6 +251,100 @@ def _wait_for_filament_service_nozzle(mqtt, target_temp_c):
         f"Nozzle did not reach {int(target_temp_c)}°C within {int(FILAMENT_SERVICE_HEAT_TIMEOUT_S)}s "
         f"(last seen: {last_temp if last_temp is not None else 'unknown'}°C)"
     )
+
+
+def _z_offset_steps_to_mm(steps):
+    if steps is None:
+        return None
+    return round(int(steps) * Z_OFFSET_STEP_MM, 2)
+
+
+def _z_offset_mm_to_steps(mm_value):
+    return int(round(mm_value / Z_OFFSET_STEP_MM))
+
+
+def _format_signed_mm(mm_value):
+    return f"{mm_value:+.2f}"
+
+
+def _serialize_z_offset_state(state):
+    state = dict(state or {})
+    mm_value = state.get("mm")
+    if mm_value is None:
+        steps = state.get("steps")
+        mm_value = _z_offset_steps_to_mm(steps)
+        state["mm"] = mm_value
+    state["display"] = f"{mm_value:.2f} mm" if mm_value is not None else "unknown"
+    state.pop("seq", None)
+    return state
+
+
+def _parse_z_offset_mm(payload, key):
+    if not isinstance(payload, dict) or key not in payload:
+        raise ValueError(f"Missing {key}")
+    try:
+        value = float(payload[key])
+    except (TypeError, ValueError):
+        raise ValueError(f"{key} must be a number")
+    if not math.isfinite(value):
+        raise ValueError(f"{key} must be finite")
+    return round(value, 2)
+
+
+def _set_printer_z_offset(mqtt, target_mm, current=None):
+    target_steps = _z_offset_mm_to_steps(target_mm)
+    if current is None:
+        current = mqtt.refresh_z_offset(timeout=Z_OFFSET_REFRESH_TIMEOUT_S)
+    current_steps = current["steps"]
+    current_mm = current["mm"]
+    delta_steps = target_steps - current_steps
+    delta_mm = _z_offset_steps_to_mm(delta_steps)
+
+    if delta_steps == 0:
+        return {
+            "status": "ok",
+            "message": f"Z-offset already at {target_mm:.2f} mm.",
+            "changed": False,
+            "current": _serialize_z_offset_state(current),
+            "target": {
+                "steps": target_steps,
+                "mm": _z_offset_steps_to_mm(target_steps),
+                "display": f"{target_mm:.2f} mm",
+            },
+            "delta": {
+                "steps": 0,
+                "mm": 0.0,
+                "display": "+0.00 mm",
+            },
+        }
+
+    mqtt.send_gcode(f"M290 Z{_format_signed_mm(delta_mm)}")
+    confirmed = mqtt.wait_for_z_offset_target(
+        target_steps,
+        after_seq=current["seq"],
+        timeout=Z_OFFSET_CONFIRM_TIMEOUT_S,
+    )
+
+    return {
+        "status": "ok",
+        "message": (
+            f"Z-offset moved from {current_mm:.2f} mm to {confirmed['mm']:.2f} mm "
+            f"via M290 Z{_format_signed_mm(delta_mm)}."
+        ),
+        "changed": True,
+        "current": _serialize_z_offset_state(current),
+        "target": {
+            "steps": target_steps,
+            "mm": _z_offset_steps_to_mm(target_steps),
+            "display": f"{target_mm:.2f} mm",
+        },
+        "delta": {
+            "steps": delta_steps,
+            "mm": delta_mm,
+            "display": f"{delta_mm:+.2f} mm",
+        },
+        "confirmed": _serialize_z_offset_state(confirmed),
+    }
 
 
 # autopep8: off
@@ -1110,6 +1208,66 @@ def app_api_printer_autolevel():
             return {"error": "Auto-leveling blocked while printing"}, 409
         mqtt.send_auto_leveling()
     return {"status": "ok"}
+
+
+@app.get("/api/printer/z-offset")
+def app_api_printer_z_offset():
+    with app.svc.borrow("mqttqueue") as mqtt:
+        return {
+            "status": "ok",
+            "z_offset": _serialize_z_offset_state(mqtt.get_z_offset_state()),
+        }
+
+
+@app.post("/api/printer/z-offset/refresh")
+def app_api_printer_z_offset_refresh():
+    with app.svc.borrow("mqttqueue") as mqtt:
+        try:
+            state = mqtt.refresh_z_offset(timeout=Z_OFFSET_REFRESH_TIMEOUT_S)
+        except TimeoutError as exc:
+            return {"error": str(exc)}, 504
+        return {
+            "status": "ok",
+            "message": f"Read live Z-offset {state['mm']:.2f} mm from MQTT 1021.",
+            "z_offset": _serialize_z_offset_state(state),
+        }
+
+
+@app.post("/api/printer/z-offset")
+def app_api_printer_z_offset_set():
+    payload = request.get_json(silent=True)
+    try:
+        target_mm = _parse_z_offset_mm(payload, "target_mm")
+    except ValueError as exc:
+        return {"error": str(exc)}, 400
+
+    with app.svc.borrow("mqttqueue") as mqtt:
+        try:
+            return _set_printer_z_offset(mqtt, target_mm)
+        except TimeoutError as exc:
+            return {"error": str(exc)}, 504
+
+
+@app.post("/api/printer/z-offset/nudge")
+def app_api_printer_z_offset_nudge():
+    payload = request.get_json(silent=True)
+    try:
+        delta_mm = _parse_z_offset_mm(payload, "delta_mm")
+    except ValueError as exc:
+        return {"error": str(exc)}, 400
+
+    with app.svc.borrow("mqttqueue") as mqtt:
+        try:
+            current = mqtt.refresh_z_offset(timeout=Z_OFFSET_REFRESH_TIMEOUT_S)
+            target_mm = round(current["mm"] + delta_mm, 2)
+            result = _set_printer_z_offset(mqtt, target_mm, current=current)
+            result["nudge"] = {
+                "mm": delta_mm,
+                "display": f"{delta_mm:+.2f} mm",
+            }
+            return result
+        except TimeoutError as exc:
+            return {"error": str(exc)}, 504
 
 
 def _read_bed_leveling_grid():

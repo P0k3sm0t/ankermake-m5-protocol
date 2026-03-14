@@ -309,6 +309,57 @@
                             </div>
                         </div>
 
+                        <div class="row g-3 mb-3">
+                            <div class="col-12">
+                                <div class="card">
+                                    <div class="card-header fs-4 d-flex justify-content-between align-items-center">
+                                        <span><i class="bi bi-arrow-down-up"></i> Z-Offset</span>
+                                        <button id="z-offset-refresh-btn" type="button" class="btn btn-sm btn-outline-primary">
+                                            <i class="bi bi-arrow-clockwise"></i> Refresh
+                                        </button>
+                                    </div>
+                                    <div class="card-body">
+                                        <div class="row g-3 align-items-end">
+                                            <div class="col-lg-4">
+                                                <label class="form-label" for="z-offset-current">Current</label>
+                                                <div id="z-offset-current" class="form-control bg-body-tertiary">unknown</div>
+                                                <div class="form-text">
+                                                    Live value from MQTT command <code>1021</code> (<code>z_axis_recoup</code>).
+                                                </div>
+                                            </div>
+                                            <div class="col-lg-4">
+                                                <label class="form-label" for="z-offset-target">Absolute target (mm)</label>
+                                                <div class="input-group">
+                                                    <input id="z-offset-target" type="number" class="form-control" step="0.01" inputmode="decimal" placeholder="0.00">
+                                                    <button id="z-offset-set-btn" type="button" class="btn btn-primary">
+                                                        <i class="bi bi-check2"></i> Set
+                                                    </button>
+                                                </div>
+                                                <div class="form-text">
+                                                    Uses <code>M290</code> and waits for MQTT readback confirmation.
+                                                </div>
+                                            </div>
+                                            <div class="col-lg-4">
+                                                <label class="form-label d-block">Nudge</label>
+                                                <div class="d-flex gap-2 flex-wrap">
+                                                    <button id="z-offset-minus-btn" type="button" class="btn btn-outline-secondary">
+                                                        <i class="bi bi-dash-lg"></i> 0.01
+                                                    </button>
+                                                    <button id="z-offset-plus-btn" type="button" class="btn btn-outline-secondary">
+                                                        <i class="bi bi-plus-lg"></i> 0.01
+                                                    </button>
+                                                </div>
+                                                <div class="form-text">
+                                                    This section is also the future home for build-plate presets with fixed offsets.
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div id="z-offset-status" class="mt-3"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
                         <!-- Lower: Compare Snapshots (full width, independent scroll) -->
                         <div class="card">
                             <div class="card-header">

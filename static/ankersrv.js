@@ -286,6 +286,106 @@ $(function () {
         uploadSize = 0;
     }
 
+    const Z_OFFSET_STEP_MM = 0.01;
+    let _zOffsetCurrentMm = null;
+
+    function normalizeZOffsetMm(value) {
+        const number = Number(value);
+        if (!Number.isFinite(number)) {
+            return null;
+        }
+        return Math.round(number * 100) / 100;
+    }
+
+    function extractZOffsetMm(payload) {
+        if (!payload || typeof payload !== "object") {
+            return null;
+        }
+        const keys = ["value", "zAxisRecoup", "z_axis_recoup", "zOffset", "z_offset"];
+        for (const key of keys) {
+            if (!(key in payload)) {
+                continue;
+            }
+            const steps = Number(payload[key]);
+            if (Number.isFinite(steps)) {
+                return normalizeZOffsetMm(steps * Z_OFFSET_STEP_MM);
+            }
+        }
+        if ("mm" in payload) {
+            return normalizeZOffsetMm(payload.mm);
+        }
+        return null;
+    }
+
+    function formatZOffsetMm(value) {
+        const mm = normalizeZOffsetMm(value);
+        return mm === null ? "unknown" : `${mm.toFixed(2)} mm`;
+    }
+
+    function setZOffsetStatus(message, category = "secondary") {
+        const el = document.getElementById("z-offset-status");
+        if (!el) {
+            return;
+        }
+        if (!message) {
+            el.innerHTML = "";
+            return;
+        }
+        el.innerHTML =
+            `<div class="alert alert-${category} py-2 small mb-0">${escapeHtml(message)}</div>`;
+    }
+
+    function applyZOffsetState(zOffset, options = {}) {
+        const currentEl = document.getElementById("z-offset-current");
+        const targetEl = document.getElementById("z-offset-target");
+        if (!currentEl || !targetEl || !zOffset) {
+            return;
+        }
+
+        const mm = extractZOffsetMm(zOffset);
+        if (mm === null) {
+            currentEl.textContent = "unknown";
+            return;
+        }
+
+        _zOffsetCurrentMm = mm;
+        currentEl.textContent = formatZOffsetMm(mm);
+
+        if (options.populateTarget || !String(targetEl.value || "").trim()) {
+            targetEl.value = mm.toFixed(2);
+        }
+
+        if (options.statusMessage) {
+            setZOffsetStatus(options.statusMessage, options.statusCategory || "secondary");
+        }
+    }
+
+    async function zOffsetRequest(url, payload = null) {
+        const resp = await fetch(url, {
+            method: payload ? "POST" : "GET",
+            headers: payload ? { "Content-Type": "application/json" } : undefined,
+            body: payload ? JSON.stringify(payload) : undefined,
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+            throw new Error(data.error || `HTTP ${resp.status}`);
+        }
+        return data;
+    }
+
+    async function loadZOffset(refresh = false, options = {}) {
+        const data = refresh
+            ? await zOffsetRequest("/api/printer/z-offset/refresh", {})
+            : await zOffsetRequest("/api/printer/z-offset");
+
+        applyZOffsetState(data.z_offset, {
+            populateTarget: options.populateTarget === true,
+            statusMessage: options.statusMessage ? (data.message || options.statusMessage) : null,
+            statusCategory: options.statusCategory || "secondary",
+        });
+        return data;
+    }
+
     /**
      * Auto web sockets
      */
@@ -367,6 +467,8 @@ $(function () {
                         `<div class="progress-bar progress-bar-striped progress-bar-animated" ` +
                         `style="width:${pct}%" aria-valuenow="${pct}"></div></div></div>`;
                 }
+            } else if (data.commandType == 1021) {
+                applyZOffsetState(data, { populateTarget: false });
             } else if (data.commandType == 1044) {
                 // Print start notification — extract basename from filePath
                 const filePath = data.filePath || "";
@@ -396,6 +498,8 @@ $(function () {
             $("#print-layer").text("0 / 0");
             document.title = "ankerctl";
             _updatePrintControlButtons(PRINT_STATE.IDLE);
+            _zOffsetCurrentMm = null;
+            $("#z-offset-current").text("unknown");
         },
     });
 
@@ -911,6 +1015,92 @@ $(function () {
         } finally {
             btn.prop("disabled", false);
         }
+    });
+
+    $("#z-offset-refresh-btn").on("click", async function () {
+        const btn = $(this);
+        btn.prop("disabled", true);
+        setZOffsetStatus("Reading live Z-offset from MQTT 1021...", "info");
+        try {
+            const data = await loadZOffset(true, {
+                populateTarget: true,
+                statusMessage: true,
+                statusCategory: "success",
+            });
+            applyZOffsetState(data.z_offset, { populateTarget: true });
+        } catch (err) {
+            setZOffsetStatus(`Refresh failed: ${err.message}`, "danger");
+        } finally {
+            btn.prop("disabled", false);
+        }
+    });
+
+    $("#z-offset-set-btn").on("click", async function () {
+        const btn = $(this);
+        const targetRaw = $("#z-offset-target").val();
+        const targetMm = normalizeZOffsetMm(targetRaw);
+        if (targetMm === null) {
+            setZOffsetStatus("Target Z-offset must be a valid number.", "warning");
+            return;
+        }
+
+        btn.prop("disabled", true);
+        setZOffsetStatus(`Setting Z-offset to ${targetMm.toFixed(2)} mm...`, "info");
+        try {
+            const data = await zOffsetRequest("/api/printer/z-offset", { target_mm: targetMm });
+            applyZOffsetState(data.confirmed || data.target || data.current, {
+                populateTarget: true,
+                statusMessage: data.message,
+                statusCategory: data.changed === false ? "secondary" : "success",
+            });
+        } catch (err) {
+            setZOffsetStatus(`Set failed: ${err.message}`, "danger");
+        } finally {
+            btn.prop("disabled", false);
+        }
+    });
+
+    async function nudgeZOffset(deltaMm) {
+        setZOffsetStatus(`Nudging Z-offset by ${deltaMm > 0 ? "+" : ""}${deltaMm.toFixed(2)} mm...`, "info");
+        const data = await zOffsetRequest("/api/printer/z-offset/nudge", { delta_mm: deltaMm });
+        applyZOffsetState(data.confirmed || data.target || data.current, {
+            populateTarget: true,
+            statusMessage: data.message,
+            statusCategory: "success",
+        });
+    }
+
+    $("#z-offset-minus-btn").on("click", async function () {
+        const btn = $(this);
+        btn.prop("disabled", true);
+        try {
+            await nudgeZOffset(-0.01);
+        } catch (err) {
+            setZOffsetStatus(`Nudge failed: ${err.message}`, "danger");
+        } finally {
+            btn.prop("disabled", false);
+        }
+    });
+
+    $("#z-offset-plus-btn").on("click", async function () {
+        const btn = $(this);
+        btn.prop("disabled", true);
+        try {
+            await nudgeZOffset(0.01);
+        } catch (err) {
+            setZOffsetStatus(`Nudge failed: ${err.message}`, "danger");
+        } finally {
+            btn.prop("disabled", false);
+        }
+    });
+
+    setZOffsetStatus("Reading live Z-offset from MQTT 1021...", "info");
+    loadZOffset(true, {
+        populateTarget: true,
+        statusMessage: true,
+        statusCategory: "secondary",
+    }).catch(function (err) {
+        setZOffsetStatus(`Initial read failed: ${err.message}`, "warning");
     });
 
     /**
