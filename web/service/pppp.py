@@ -95,8 +95,11 @@ class PPPPService(Service):
         api.connect_lan_search()
 
         while api.state != PPPPState.Connected:
+            remaining = (deadline - datetime.now()).total_seconds()
+            if remaining <= 0:
+                raise ConnectionRefusedError("Connection rejected by device")
             try:
-                msg = api.recv(timeout=(deadline - datetime.now()).total_seconds())
+                msg = api.recv(timeout=remaining)
                 api.process(msg)
             except StopIteration:
                 raise ConnectionRefusedError("Connection rejected by device")
