@@ -14,7 +14,13 @@ import cli.pppp
 
 
 def probe_pppp(config, printer_index) -> bool:
-    """Try a PPPP LAN connection. Returns True if handshake succeeds, False otherwise."""
+    """Try a PPPP LAN connection. Returns True if handshake succeeds, False otherwise.
+
+    Delegates to pppp_resolve_printer_ip(), which internally calls
+    probe_printer_ip() — a full PPPP handshake that already proves
+    reachability.  A successful IP resolution means the printer is
+    online and responding to PPPP on the LAN.
+    """
     try:
         with config.open() as cfg:
             if not cfg:
@@ -22,36 +28,8 @@ def probe_pppp(config, printer_index) -> bool:
             printer = cfg.printers[printer_index]
 
         ip_addr = cli.pppp.pppp_resolve_printer_ip(config, printer, printer_index)
-        if not ip_addr:
-            return False
-
-        deadline = datetime.now() + timedelta(seconds=5)
-        api = AnkerPPPPAsyncApi.open_lan(Duid.from_string(printer.p2p_duid), host=ip_addr)
-        try:
-            api.connect_lan_search()
-
-            while api.state != PPPPState.Connected:
-                remaining = (deadline - datetime.now()).total_seconds()
-                if remaining <= 0:
-                    return False
-                try:
-                    msg = api.recv(timeout=remaining)
-                    api.process(msg)
-                except (TimeoutError, ConnectionResetError):
-                    return False
-
-            try:
-                api.send(PktClose())
-            except Exception:
-                pass
-            return True
-        finally:
-            try:
-                api.sock.close()
-            except Exception:
-                pass
-    except Exception as e:
-        log.debug(f"PPPP probe failed unexpectedly: {e}")
+        return bool(ip_addr)
+    except Exception:
         return False
 
 
