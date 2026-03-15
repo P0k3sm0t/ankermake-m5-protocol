@@ -284,5 +284,5 @@ def test_filament_swap_routes_cover_legacy_start_confirm_and_cancel(tmp_path, mo
     assert confirmed.get_json()["pending"] is True
     assert cancelled.status_code == 200
     assert cancelled.get_json()["pending"] is False
-    assert "G1 E-40 F2400" in sent[0]
-    assert "G1 E55 F720" in sent[1]
+    assert "G1 E-40 F240" in sent[0]
+    assert "G1 E55 F240" in sent[1]

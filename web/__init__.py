@@ -171,6 +171,8 @@ def _resolve_filament_service_settings(cfg):
 FILAMENT_SERVICE_DEFAULT_LENGTH_MM = 40.0
 FILAMENT_SERVICE_MAX_LENGTH_MM = 300.0
 FILAMENT_SERVICE_FEEDRATE_MM_MIN = 240
+FILAMENT_SERVICE_SWAP_UNLOAD_FEEDRATE_MM_MIN = 240
+FILAMENT_SERVICE_SWAP_LOAD_FEEDRATE_MM_MIN = 240
 FILAMENT_SERVICE_HEAT_TIMEOUT_S = 240.0
 FILAMENT_SERVICE_HEAT_POLL_S = 0.5
 FILAMENT_SERVICE_HEAT_TOLERANCE_C = 5
@@ -2204,8 +2206,8 @@ def app_api_filament_service_swap_start():
         except LookupError as exc:
             return {"error": str(exc)}, 404
 
-        unload_feedrate_mm_min = _filament_service_feedrate_mm_min(unload_profile, "unload")
-        load_feedrate_mm_min = _filament_service_feedrate_mm_min(load_profile, "load")
+        unload_feedrate_mm_min = FILAMENT_SERVICE_SWAP_UNLOAD_FEEDRATE_MM_MIN
+        load_feedrate_mm_min = FILAMENT_SERVICE_SWAP_LOAD_FEEDRATE_MM_MIN
 
     with app.filament_swap_lock:
         if app.filament_swap_state is not None:
