@@ -1,8 +1,10 @@
 from contextlib import contextmanager
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 from cli.model import Account, Config, Printer
+from libflagship import resolve_root_dir
 from web import (
     _build_command_group,
     _build_filament_move_gcode,
@@ -146,6 +148,24 @@ def test_configure_request_limits_separates_file_and_form_limits():
     assert flask_app.config["MAX_FORM_PARTS"] == 12
 
 
+def test_resolve_root_dir_supports_bundled_and_source_layouts(tmp_path):
+    assert resolve_root_dir(
+        frozen=False,
+        file_path="/tmp/ankerctl/libflagship/__init__.py",
+    ) == Path("/tmp/ankerctl")
+
+    assert resolve_root_dir(
+        frozen=True,
+        meipass=str(tmp_path / "bundle"),
+    ) == (tmp_path / "bundle").resolve()
+
+    assert resolve_root_dir(
+        frozen=True,
+        meipass=None,
+        executable=str(tmp_path / "dist" / "ankerctl"),
+    ) == (tmp_path / "dist").resolve()
+
+
 def test_flash_redirect_requires_path_and_redirects():
     with app.test_request_context("/"):
         response = flash_redirect("/next", "Saved", "success")
@@ -242,6 +262,52 @@ def test_api_printers_and_switch_active_printer(monkeypatch):
         app.svc = old_svc
         for key, value in old_values.items():
             app.config[key] = value
+
+
+def test_root_shows_ffmpeg_warning_only_for_camera_capable_devices(monkeypatch):
+    cfg = Config(
+        account=Account(
+            auth_token="token",
+            region="eu",
+            user_id="user-1",
+            email="user@example.com",
+        ),
+        printers=[_printer("SN1", "Printer One", model="V8111")],
+    )
+    manager = FakeConfigManager(cfg)
+    client = app.test_client()
+
+    old_values = {
+        "config": app.config.get("config"),
+        "printer_index": app.config.get("printer_index"),
+        "printer_index_locked": app.config.get("printer_index_locked"),
+        "video_supported": app.config.get("video_supported"),
+        "login": app.config.get("login"),
+        "unsupported_device": app.config.get("unsupported_device"),
+        "api_key": app.config.get("api_key"),
+    }
+
+    app.config["config"] = manager
+    app.config["printer_index"] = 0
+    app.config["printer_index_locked"] = False
+    app.config["video_supported"] = True
+    app.config["login"] = True
+    app.config["unsupported_device"] = False
+    app.config["api_key"] = None
+
+    try:
+        monkeypatch.setattr("web._ffmpeg_available", lambda: False)
+        camera = client.get("/")
+        app.config["video_supported"] = False
+        no_camera = client.get("/")
+    finally:
+        for key, value in old_values.items():
+            app.config[key] = value
+
+    assert camera.status_code == 200
+    assert "Camera features need `ffmpeg`" in camera.get_data(as_text=True)
+    assert no_camera.status_code == 200
+    assert "Camera features need `ffmpeg`" not in no_camera.get_data(as_text=True)
 
 
 def test_printer_control_guard_without_login():

@@ -31,6 +31,7 @@ import json
 import logging
 import math
 import os
+import shutil
 import threading
 import time
 
@@ -102,6 +103,10 @@ def _env_int(name, default, min_value=1, env=None):
         return default
 
     return value
+
+
+def _ffmpeg_available():
+    return shutil.which("ffmpeg") is not None
 
 
 def _configure_request_limits(flask_app, env=None):
@@ -931,6 +936,7 @@ def app_root():
             country_codes=json.dumps(cli.countrycodes.country_codes),
             current_country=country,
             video_supported=app.config.get("video_supported", False),
+            ffmpeg_available=_ffmpeg_available(),
             upload_rate_mbps=upload_rate_mbps,
             upload_rate_config=upload_rate_config,
             upload_rate_source=upload_rate_source,

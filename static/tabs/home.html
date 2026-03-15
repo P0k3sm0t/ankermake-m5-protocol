@@ -4,6 +4,18 @@
         <div class="row g-3">
             <div class="col-md-12 col-lg-6 col-xl-8">
                 {% if video_supported %}
+                {% if not ffmpeg_available %}
+                <div class="alert alert-warning d-flex gap-2 align-items-start">
+                    <span class="mt-1">{{ macro.bi_icon("exclamation-triangle-fill") }}</span>
+                    <div>
+                        <div class="fw-semibold">Camera features need `ffmpeg`</div>
+                        <div class="small">
+                            Snapshots, timelapse capture and related video tools are limited until `ffmpeg` is installed
+                            on this host. Live video can still work without it.
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
                 <!-- Video Container -->
                 <div id="vplayer" style="display: none;">
                     <video class="w-100 d-block rounded-3 bg-body-tertiary" playsinline autoplay muted id="player"
