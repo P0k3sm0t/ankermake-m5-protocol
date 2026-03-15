@@ -55,3 +55,18 @@ def test_history_prunes_to_max_entries(tmp_path):
 
     assert history.get_count() == 2
     assert [entry["filename"] for entry in entries] == ["three.gcode", "two.gcode"]
+
+
+def test_history_clear_and_fallback_finish_latest_active(tmp_path):
+    history = PrintHistory(db_path=tmp_path / "history.db")
+
+    history.record_start("one.gcode", task_id="1")
+    history.record_start("two.gcode", task_id="2")
+    history.record_finish()
+
+    entries = history.get_history(limit=10)
+    assert entries[0]["filename"] == "two.gcode"
+    assert entries[0]["status"] == "finished"
+
+    history.clear()
+    assert history.get_count() == 0

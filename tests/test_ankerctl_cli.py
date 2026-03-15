@@ -1,0 +1,110 @@
+from types import SimpleNamespace
+
+from click.testing import CliRunner
+
+import ankerctl
+
+
+class FakeConfigManager:
+    def __init__(self):
+        self.api_keys = []
+        self.removed = 0
+
+    def set_api_key(self, key):
+        self.api_keys.append(key)
+
+    def remove_api_key(self):
+        self.removed += 1
+
+
+def test_main_configures_logging_and_skips_upgrade_for_http(monkeypatch):
+    runner = CliRunner()
+    fake_config = FakeConfigManager()
+    logging_calls = []
+    upgrades = []
+
+    monkeypatch.setattr("ankerctl.cli.config.configmgr", lambda: fake_config)
+    monkeypatch.setattr("ankerctl.cli.logfmt.setup_logging", lambda level, log_dir=None: logging_calls.append((level, log_dir)))
+    monkeypatch.setattr("ankerctl.Environment.upgrade_config_if_needed", lambda self: upgrades.append("upgrade"))
+    monkeypatch.setattr("ankerctl.libflagship.seccode.calc_check_code", lambda duid, mac: "CODE123")
+
+    result = runner.invoke(
+        ankerctl.main,
+        ["-v", "--printer", "2", "http", "calc-check-code", "DUID", "11:22:33:44:55:66"],
+    )
+
+    assert result.exit_code == 0
+    assert "check_code: CODE123" in result.output
+    assert logging_calls and logging_calls[0][0] == 10
+    assert upgrades == []
+
+
+def test_mqtt_send_blocks_dangerous_commands_without_force(monkeypatch):
+    runner = CliRunner()
+    fake_config = FakeConfigManager()
+    opened = []
+
+    monkeypatch.setattr("ankerctl.cli.config.configmgr", lambda: fake_config)
+    monkeypatch.setattr("ankerctl.cli.logfmt.setup_logging", lambda level, log_dir=None: None)
+    monkeypatch.setattr("ankerctl.Environment.upgrade_config_if_needed", lambda self: None)
+    monkeypatch.setattr("ankerctl.Environment.load_config", lambda self, required=True: None)
+    monkeypatch.setattr("ankerctl.cli.mqtt.mqtt_open", lambda *args, **kwargs: opened.append(True))
+
+    result = runner.invoke(
+        ankerctl.main,
+        ["mqtt", "send", "ZZ_MQTT_CMD_RECOVER_FACTORY"],
+    )
+
+    assert result.exit_code == 0
+    assert opened == []
+
+
+def test_http_calc_sec_code_and_webserver_run_dispatch(monkeypatch):
+    runner = CliRunner()
+    fake_config = FakeConfigManager()
+    webserver_calls = []
+
+    monkeypatch.setattr("ankerctl.cli.config.configmgr", lambda: fake_config)
+    monkeypatch.setattr("ankerctl.cli.logfmt.setup_logging", lambda level, log_dir=None: None)
+    monkeypatch.setattr("ankerctl.Environment.upgrade_config_if_needed", lambda self: None)
+    monkeypatch.setattr("ankerctl.Environment.load_config", lambda self, required=True: None)
+    monkeypatch.setattr("ankerctl.libflagship.seccode.create_check_code_v1", lambda duid, mac: (123, "SEC456"))
+    monkeypatch.setattr("web.webserver", lambda config, printer_index, host, port, insecure, **kwargs: webserver_calls.append((config, printer_index, host, port, insecure, kwargs)))
+
+    sec_result = runner.invoke(
+        ankerctl.main,
+        ["http", "calc-sec-code", "DUID", "11:22:33:44:55:66"],
+    )
+    run_result = runner.invoke(
+        ankerctl.main,
+        ["--insecure", "--pppp-dump", "trace.log", "--printer", "1", "webserver", "run", "--host", "0.0.0.0", "--port", "7788"],
+    )
+
+    assert sec_result.exit_code == 0
+    assert "sec_ts:   123" in sec_result.output
+    assert "sec_code: SEC456" in sec_result.output
+    assert run_result.exit_code == 0
+    assert webserver_calls == [
+        (fake_config, 1, "0.0.0.0", 7788, True, {"pppp_dump": "trace.log"})
+    ]
+
+
+def test_config_password_commands_validate_generate_and_remove(monkeypatch):
+    runner = CliRunner()
+    fake_config = FakeConfigManager()
+
+    monkeypatch.setattr("ankerctl.cli.config.configmgr", lambda: fake_config)
+    monkeypatch.setattr("ankerctl.cli.logfmt.setup_logging", lambda level, log_dir=None: None)
+    monkeypatch.setattr("ankerctl.Environment.upgrade_config_if_needed", lambda self: None)
+    monkeypatch.setattr("ankerctl.cli.config.validate_api_key", lambda key: (False, "bad key"))
+    monkeypatch.setattr("ankerctl.secrets.token_hex", lambda size: "RANDOMKEY1234567890")
+
+    invalid = runner.invoke(ankerctl.main, ["config", "set-password", "bad"])
+    generated = runner.invoke(ankerctl.main, ["config", "set-password"])
+    removed = runner.invoke(ankerctl.main, ["config", "remove-password"])
+
+    assert invalid.exit_code == 0
+    assert generated.exit_code == 0
+    assert removed.exit_code == 0
+    assert fake_config.api_keys == ["RANDOMKEY1234567890"]
+    assert fake_config.removed == 1

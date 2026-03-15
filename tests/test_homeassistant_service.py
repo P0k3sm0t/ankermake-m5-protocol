@@ -162,3 +162,38 @@ def test_homeassistant_start_and_stop(monkeypatch):
     assert fake_client.loop_started is True
     assert fake_client.disconnected is True
     assert fake_client.loop_stopped is True
+
+
+def test_homeassistant_reload_restarts_on_config_change(monkeypatch):
+    svc = HomeAssistantService(FakeConfigManager(_service_config()), printer_sn="SN123", printer_name="Printer")
+    svc._client = FakeMQTTClient()
+    calls = []
+    monkeypatch.setattr(svc, "stop", lambda: calls.append("stop"))
+    monkeypatch.setattr(svc, "start", lambda: calls.append("start"))
+
+    changed = SimpleNamespace(
+        home_assistant={
+            "enabled": True,
+            "mqtt_host": "other.example",
+            "mqtt_port": 1884,
+            "mqtt_username": "ha-user",
+            "mqtt_password": "ha-pass",
+            "discovery_prefix": "ha",
+        }
+    )
+
+    svc.reload_config(changed)
+
+    assert calls == ["stop", "start"]
+    assert svc._host == "other.example"
+
+
+def test_homeassistant_disconnect_and_publish_failures_are_non_fatal():
+    svc = HomeAssistantService(FakeConfigManager(_service_config()), printer_sn="SN123", printer_name="Printer")
+    svc._client = SimpleNamespace(publish=lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+    svc._connected = True
+
+    svc._publish("topic/test", "payload", retain=True)
+    svc._on_disconnect(None, None, 1)
+
+    assert svc._connected is False
