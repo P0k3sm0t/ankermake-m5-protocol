@@ -1,0 +1,323 @@
+import importlib
+import json
+from contextlib import contextmanager
+from datetime import datetime
+from types import SimpleNamespace
+
+from cli.model import Account, Config, Printer
+from simple_websocket.errors import ConnectionClosed
+
+import web as web_module
+from web.lib.service import RunState
+
+
+API_KEY = "secret-key-123456"
+
+
+def _printer(sn="SN1", name="Printer", model="V8111"):
+    return Printer(
+        id=sn,
+        sn=sn,
+        name=name,
+        model=model,
+        create_time=datetime(2024, 1, 1, 12, 0, 0),
+        update_time=datetime(2024, 1, 1, 12, 0, 0),
+        wifi_mac="aabbccddeeff",
+        ip_addr="192.168.1.10",
+        mqtt_key=b"\x01\x02",
+        api_hosts=["api.example"],
+        p2p_hosts=["p2p.example"],
+        p2p_duid=f"duid-{sn}",
+        p2p_key="secret",
+    )
+
+
+class FakeConfigManager:
+    def __init__(self, cfg):
+        self.cfg = cfg
+
+    @contextmanager
+    def open(self):
+        yield self.cfg
+
+    @contextmanager
+    def modify(self):
+        yield self.cfg
+
+
+class FakeSock:
+    def __init__(self, receives=None, close_after_sends=None):
+        self.receives = list(receives or [])
+        self.sent = []
+        self.close_after_sends = close_after_sends
+
+    def send(self, data):
+        self.sent.append(data)
+        if self.close_after_sends is not None and len(self.sent) >= self.close_after_sends:
+            raise ConnectionClosed()
+
+    def receive(self):
+        if not self.receives:
+            return None
+        value = self.receives.pop(0)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+
+class FakeServices:
+    def __init__(self, *, streams=None, borrowed=None, svcs=None, refs=None):
+        self._streams = streams or {}
+        self._borrowed = borrowed or {}
+        self.svcs = svcs or {}
+        self.refs = refs or {}
+
+    def stream(self, name):
+        yield from self._streams.get(name, [])
+
+    @contextmanager
+    def borrow(self, name):
+        yield self._borrowed.get(name)
+
+
+def _base_config():
+    return Config(
+        account=Account(
+            auth_token="token",
+            region="eu",
+            user_id="user-1",
+            email="user@example.com",
+        ),
+        printers=[_printer()],
+    )
+
+
+def _ws_handler(module, name):
+    return module.app.view_functions[name].__closure__[0].cell_contents
+
+
+def _install_app_state(module, **values):
+    app = module.app
+    keys = [
+        "config",
+        "api_key",
+        "login",
+        "printer_index",
+        "video_supported",
+        "unsupported_device",
+    ]
+    old_values = {key: app.config.get(key) for key in keys}
+    old_svc = app.svc
+    app.config.update({
+        "config": FakeConfigManager(_base_config()),
+        "api_key": None,
+        "login": True,
+        "printer_index": 0,
+        "video_supported": True,
+        "unsupported_device": False,
+    })
+    for key, value in values.items():
+        if key == "svc":
+            app.svc = value
+        else:
+            app.config[key] = value
+    return old_values, old_svc
+
+
+def _restore_app_state(module, old_values, old_svc):
+    module.app.svc = old_svc
+    for key, value in old_values.items():
+        module.app.config[key] = value
+
+
+def test_mqtt_and_upload_websockets_forward_stream_messages():
+    sock = FakeSock()
+    services = FakeServices(
+        streams={
+            "mqttqueue": [{"hello": "mqtt"}],
+            "filetransfer": [{"status": "done"}],
+        }
+    )
+    old_values, old_svc = _install_app_state(web_module, svc=services)
+
+    try:
+        _ws_handler(web_module, "mqtt")(sock)
+        _ws_handler(web_module, "upload")(sock)
+    finally:
+        _restore_app_state(web_module, old_values, old_svc)
+
+    assert sock.sent == [
+        json.dumps({"hello": "mqtt"}),
+        json.dumps({"status": "done"}),
+    ]
+
+
+def test_video_websocket_toggles_streaming_and_ctrl_dispatches_commands():
+    set_enabled = []
+    light_calls = []
+    profile_calls = []
+    quality_calls = []
+    videoqueue = SimpleNamespace(
+        saved_video_profile_id="balanced",
+        set_video_enabled=lambda enabled: set_enabled.append(enabled),
+        api_light_state=lambda enabled: light_calls.append(enabled),
+        api_video_profile=lambda profile: profile_calls.append(profile),
+        api_video_mode=lambda quality: quality_calls.append(quality),
+    )
+    services = FakeServices(
+        streams={"videoqueue": [SimpleNamespace(data=b"frame-1"), SimpleNamespace(data=b"frame-2")]},
+        borrowed={"videoqueue": videoqueue},
+        svcs={"videoqueue": videoqueue},
+        refs={"videoqueue": 0},
+    )
+    old_values, old_svc = _install_app_state(web_module, svc=services)
+
+    try:
+        video_sock = FakeSock()
+        _ws_handler(web_module, "video")(video_sock)
+
+        ctrl_sock = FakeSock(receives=[
+            json.dumps({"light": True}),
+            json.dumps({"video_profile": "smooth"}),
+            json.dumps({"quality": 2}),
+            json.dumps({"video_enabled": False}),
+            None,
+        ])
+        _ws_handler(web_module, "ctrl")(ctrl_sock)
+    finally:
+        _restore_app_state(web_module, old_values, old_svc)
+
+    assert video_sock.sent == [b"frame-1", b"frame-2"]
+    assert set_enabled == [True, False, False]
+    assert json.loads(ctrl_sock.sent[0]) == {"ankerctl": 1}
+    assert json.loads(ctrl_sock.sent[1]) == {"video_profile": "balanced"}
+    assert light_calls == [True]
+    assert profile_calls == ["smooth"]
+    assert quality_calls == [2]
+
+
+def test_pppp_probe_helper_and_state_websocket_emit_status(monkeypatch):
+    with web_module.app.pppp_probe_lock:
+        web_module.app.pppp_probe = {
+            "result": None,
+            "last_time": 0.0,
+            "fail_count": 0,
+            "thread": None,
+            "client_count": 1,
+        }
+
+    old_values, old_svc = _install_app_state(web_module, config=FakeConfigManager(_base_config()), printer_index=0)
+    monkeypatch.setattr("web.service.pppp.probe_pppp", lambda config, idx: True)
+    monkeypatch.setattr("web.time.time", lambda: 100.0)
+
+    try:
+        web_module._maybe_start_pppp_probe("test")
+        with web_module.app.pppp_probe_lock:
+            thread = web_module.app.pppp_probe["thread"]
+        if thread is not None:
+            thread.join(timeout=1.0)
+        sock = FakeSock(close_after_sends=1)
+        services = FakeServices(
+            svcs={
+                "pppp": SimpleNamespace(connected=False, wanted=False),
+                "mqttqueue": SimpleNamespace(last_message_time=0.0),
+            }
+        )
+        web_module.app.svc = services
+        monkeypatch.setattr("web._maybe_start_pppp_probe", lambda reason="scheduled": None)
+        monkeypatch.setattr("web.time.sleep", lambda seconds: None)
+        _ws_handler(web_module, "pppp_state")(sock)
+    finally:
+        _restore_app_state(web_module, old_values, old_svc)
+        with web_module.app.pppp_probe_lock:
+            web_module.app.pppp_probe = {
+                "result": None,
+                "last_time": 0.0,
+                "fail_count": 0,
+                "thread": None,
+                "client_count": 0,
+            }
+
+    assert json.loads(sock.sent[0]) == {"status": "connected"}
+
+
+def test_dev_debug_routes_register_and_dispatch(monkeypatch):
+    monkeypatch.setenv("ANKERCTL_DEV_MODE", "true")
+    importlib.reload(web_module)
+
+    try:
+        app = web_module.app
+        client = app.test_client()
+        set_debug = []
+        simulated = []
+        restart_calls = []
+
+        mqtt = SimpleNamespace(
+            state=RunState.Running,
+            wanted=True,
+            get_state=lambda: {"debug_logging": False},
+            set_debug_logging=lambda enabled: set_debug.append(enabled),
+            simulate_event=lambda event_type, payload: simulated.append((event_type, payload)),
+        )
+        pppp = SimpleNamespace(
+            state=RunState.Running,
+            wanted=True,
+            restart=lambda: restart_calls.append(True),
+        )
+        services = SimpleNamespace(
+            borrow=lambda name: _borrow_debug(mqtt if name == "mqttqueue" else None),
+            svcs={"mqttqueue": mqtt, "pppp": pppp},
+            refs={"mqttqueue": 1, "pppp": 0},
+        )
+        app.svc = services
+        app.config["api_key"] = API_KEY
+        app.config["login"] = True
+        app.config["config"] = FakeConfigManager(_base_config())
+        app.config["printer_index"] = 0
+
+        class FakeThread:
+            def __init__(self, target, daemon=True):
+                self._target = target
+
+            def start(self):
+                self._target()
+
+        monkeypatch.setattr("web.threading.Thread", FakeThread)
+        monkeypatch.setattr("web.service.pppp.probe_pppp", lambda config, idx: True)
+
+        unauthorized = client.get("/api/debug/state")
+        state = client.get("/api/debug/state", headers={"X-Api-Key": API_KEY})
+        configured = client.post(
+            "/api/debug/config",
+            json={"debug_logging": True},
+            headers={"X-Api-Key": API_KEY},
+        )
+        simulated_resp = client.post(
+            "/api/debug/simulate",
+            json={"type": "start", "payload": {"filename": "cube.gcode"}},
+            headers={"X-Api-Key": API_KEY},
+        )
+        services_resp = client.get("/api/debug/services", headers={"X-Api-Key": API_KEY})
+        restarted = client.post("/api/debug/services/pppp/restart", headers={"X-Api-Key": API_KEY})
+        tested = client.post("/api/debug/services/pppp/test", headers={"X-Api-Key": API_KEY})
+    finally:
+        monkeypatch.setenv("ANKERCTL_DEV_MODE", "false")
+        importlib.reload(web_module)
+
+    assert unauthorized.status_code == 401
+    assert state.status_code == 200
+    assert state.get_json()["debug_logging"] is False
+    assert configured.status_code == 200
+    assert simulated_resp.status_code == 200
+    assert services_resp.status_code == 200
+    assert services_resp.get_json()["services"]["pppp"]["state"] == "Running"
+    assert restarted.status_code == 200
+    assert tested.get_json() == {"result": "ok"}
+    assert set_debug == [True]
+    assert simulated == [("start", {"filename": "cube.gcode"})]
+    assert restart_calls == [True]
+
+
+@contextmanager
+def _borrow_debug(value):
+    yield value
