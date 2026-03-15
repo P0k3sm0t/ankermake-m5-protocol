@@ -71,6 +71,13 @@ def default_home_assistant_config():
     }
 
 
+def default_filament_service_config():
+    return {
+        "allow_legacy_swap": os.getenv("FILAMENT_ALLOW_LEGACY_SWAP", "false").lower() in ("true", "1", "yes"),
+        "manual_swap_preheat_temp_c": int(os.getenv("FILAMENT_MANUAL_SWAP_PREHEAT_TEMP_C", 140)),
+    }
+
+
 def merge_dict_defaults(data, defaults):
     if not isinstance(data, dict):
         return defaults
@@ -196,6 +203,7 @@ class Config(Serialize):
     notifications: dict = field(default_factory=default_notifications_config)
     timelapse: dict = field(default_factory=default_timelapse_config)
     home_assistant: dict = field(default_factory=default_home_assistant_config)
+    filament_service: dict = field(default_factory=default_filament_service_config)
     active_printer_index: int = field(default=0)
 
     @classmethod
@@ -224,6 +232,10 @@ class Config(Serialize):
             "home_assistant": merge_dict_defaults(
                 data.get("home_assistant"),
                 default_home_assistant_config(),
+            ),
+            "filament_service": merge_dict_defaults(
+                data.get("filament_service"),
+                default_filament_service_config(),
             ),
         }
         return super().from_dict(data)

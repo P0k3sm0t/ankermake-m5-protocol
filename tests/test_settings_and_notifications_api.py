@@ -205,3 +205,35 @@ def test_timelapse_and_mqtt_settings_endpoints_reload_services():
     assert reload_calls[1][0] == "ha"
     assert hasattr(reload_calls[0][1], "open")
     assert hasattr(reload_calls[1][1], "modify")
+
+
+def test_filament_service_settings_endpoints_persist_manual_and_legacy_modes():
+    client = app.test_client()
+    old, old_svc, cfg, _mqtt = _install_app_state()
+
+    try:
+        unauthorized = client.get("/api/settings/filament-service")
+        got = client.get("/api/settings/filament-service", headers={"X-Api-Key": "secret-key-123456"})
+        updated = client.post(
+            "/api/settings/filament-service",
+            json={"filament_service": {"allow_legacy_swap": True, "manual_swap_preheat_temp_c": 149}},
+            headers={"X-Api-Key": "secret-key-123456"},
+        )
+        clamped = client.post(
+            "/api/settings/filament-service",
+            json={"filament_service": {"manual_swap_preheat_temp_c": 999}},
+            headers={"X-Api-Key": "secret-key-123456"},
+        )
+    finally:
+        _restore_app_state(old, old_svc)
+
+    assert unauthorized.status_code == 401
+    assert got.status_code == 200
+    assert got.get_json()["filament_service"]["allow_legacy_swap"] is False
+    assert updated.status_code == 200
+    assert updated.get_json()["filament_service"]["allow_legacy_swap"] is True
+    assert updated.get_json()["filament_service"]["manual_swap_preheat_temp_c"] == 149
+    assert clamped.status_code == 200
+    assert cfg.filament_service["allow_legacy_swap"] is True
+    assert cfg.filament_service["manual_swap_preheat_temp_c"] == 150
+    assert clamped.get_json()["filament_service"]["manual_swap_preheat_temp_c"] == 150

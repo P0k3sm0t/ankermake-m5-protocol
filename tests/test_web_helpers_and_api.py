@@ -7,7 +7,9 @@ from web import (
     _build_command_group,
     _build_filament_move_gcode,
     _clean_printer_report_output,
+    _configure_request_limits,
     _deep_update,
+    _env_int,
     _extract_report_commands,
     _filament_service_length,
     _filament_service_temp,
@@ -79,7 +81,7 @@ def test_deep_update_merges_nested_dicts():
 def test_filament_and_z_offset_helpers():
     assert _filament_service_temp({"nozzle_temp_other_layer": "220"}) == 220
     assert _filament_service_length({"length_mm": "42.345"}, "length_mm") == 42.34
-    assert _build_filament_move_gcode(220, 12.5).splitlines()[2] == "G1 E12.5 F240"
+    assert _build_filament_move_gcode(220, 12.5).splitlines()[1] == "G1 E12.5 F240"
     assert _z_offset_steps_to_mm(37) == 0.37
     assert _z_offset_mm_to_steps(0.37) == 37
     assert _format_signed_mm(-0.12) == "-0.12"
@@ -114,6 +116,34 @@ def test_clean_report_output_and_extract_commands():
     assert cleaned == "M301 P22.2 I1.08 D114.0\nM851 X0.00 Y0.00 Z-0.12"
     assert commands["M301"] == "M301 P22.2 I1.08 D114.0"
     assert [item["command"] for item in group] == ["M851", "M420", "M301"]
+
+
+def test_env_int_rejects_invalid_and_too_small_values(caplog):
+    assert _env_int("UPLOAD_MAX_FORM_PARTS", 20, env={}) == 20
+
+    with caplog.at_level("WARNING", logger="web"):
+        assert _env_int("UPLOAD_MAX_FORM_PARTS", 20, env={"UPLOAD_MAX_FORM_PARTS": "abc"}) == 20
+        assert _env_int("UPLOAD_MAX_FORM_PARTS", 20, env={"UPLOAD_MAX_FORM_PARTS": "0"}) == 20
+
+    assert "Ignoring invalid integer value for UPLOAD_MAX_FORM_PARTS" in caplog.text
+    assert "Ignoring UPLOAD_MAX_FORM_PARTS='0' because it is smaller than 1" in caplog.text
+
+
+def test_configure_request_limits_separates_file_and_form_limits():
+    flask_app = SimpleNamespace(config={})
+
+    _configure_request_limits(
+        flask_app,
+        env={
+            "UPLOAD_MAX_MB": "4096",
+            "UPLOAD_MAX_FORM_MEMORY_KB": "1024",
+            "UPLOAD_MAX_FORM_PARTS": "12",
+        },
+    )
+
+    assert flask_app.config["MAX_CONTENT_LENGTH"] == 4096 * 1024 * 1024
+    assert flask_app.config["MAX_FORM_MEMORY_SIZE"] == 1024 * 1024
+    assert flask_app.config["MAX_FORM_PARTS"] == 12
 
 
 def test_flash_redirect_requires_path_and_redirects():

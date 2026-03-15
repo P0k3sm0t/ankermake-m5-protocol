@@ -3,6 +3,7 @@ from datetime import datetime
 from types import SimpleNamespace
 
 from cli.model import Account, Config, Printer
+import web as web_module
 from web import app
 from web.service.filament import FilamentStore
 
@@ -181,38 +182,25 @@ def test_filament_service_preheat_and_move_routes(tmp_path):
     assert move.status_code == 200
     assert invalid.status_code == 400
     assert sent[0] == "M104 S220"
-    assert "G1 E-25 F240" in sent[1]
+    assert "G1 E-25 F2700" in sent[1]
 
 
-def test_filament_swap_routes_cover_start_confirm_and_cancel(tmp_path):
+def test_filament_swap_routes_follow_manual_guided_flow_by_default(tmp_path):
     sent = []
     mqtt = SimpleNamespace(
         is_printing=False,
-        nozzle_temp=230,
+        nozzle_temp=150,
         send_gcode=lambda gcode: sent.append(gcode),
     )
     client = app.test_client()
     old_values, old_svc, old_filaments, old_swap = _install_state(tmp_path, mqtt)
 
     try:
-        unload = app.filaments.create({"name": "PLA Black", "nozzle_temp": 220})
-        load = app.filaments.create({"name": "PETG White", "nozzle_temp": 240})
         started = client.post(
             "/api/filaments/service/swap/start",
-            json={
-                "unload_profile_id": unload["id"],
-                "load_profile_id": load["id"],
-                "unload_length_mm": 40,
-                "load_length_mm": 55,
-            },
             headers={"X-Api-Key": API_KEY},
         )
         token = started.get_json()["swap"]["token"]
-        mismatch = client.post(
-            "/api/filaments/service/swap/cancel",
-            json={"token": "wrong-token"},
-            headers={"X-Api-Key": API_KEY},
-        )
         confirmed = client.post(
             "/api/filaments/service/swap/confirm",
             json={"token": token},
@@ -227,10 +215,74 @@ def test_filament_swap_routes_cover_start_confirm_and_cancel(tmp_path):
 
     assert started.status_code == 200
     assert started.get_json()["pending"] is True
-    assert mismatch.status_code == 409
+    assert started.get_json()["swap"]["mode"] == "manual"
+    assert started.get_json()["swap"]["phase"] == "await_manual_swap"
     assert confirmed.status_code == 200
     assert confirmed.get_json()["pending"] is False
     assert cancelled.status_code == 200
     assert cancelled.get_json()["pending"] is False
-    assert "G1 E-40 F240" in sent[0]
-    assert "G1 E55 F240" in sent[1]
+    assert sent == ["M104 S140"]
+
+
+def test_filament_swap_routes_cover_legacy_start_confirm_and_cancel(tmp_path, monkeypatch):
+    sent = []
+    mqtt = SimpleNamespace(
+        is_printing=False,
+        nozzle_temp=230,
+        send_gcode=lambda gcode: sent.append(gcode),
+    )
+    client = app.test_client()
+    old_values, old_svc, old_filaments, old_swap = _install_state(tmp_path, mqtt)
+    app.config["config"].cfg.filament_service["allow_legacy_swap"] = True
+    background_calls = []
+
+    def fake_start_background(target, token):
+        background_calls.append((target, token))
+        return SimpleNamespace()
+
+    monkeypatch.setattr(web_module, "_filament_swap_start_background", fake_start_background)
+
+    try:
+        unload = app.filaments.create({"name": "PLA Black", "nozzle_temp": 220, "retract_speed": 40})
+        load = app.filaments.create({"name": "PETG White", "nozzle_temp": 240, "retract_speed": 12})
+        started = client.post(
+            "/api/filaments/service/swap/start",
+            json={
+                "unload_profile_id": unload["id"],
+                "load_profile_id": load["id"],
+                "unload_length_mm": 40,
+                "load_length_mm": 55,
+            },
+            headers={"X-Api-Key": API_KEY},
+        )
+        start_target, token = background_calls.pop()
+        start_target(token)
+        mismatch = client.post(
+            "/api/filaments/service/swap/cancel",
+            json={"token": "wrong-token"},
+            headers={"X-Api-Key": API_KEY},
+        )
+        confirmed = client.post(
+            "/api/filaments/service/swap/confirm",
+            json={"token": token},
+            headers={"X-Api-Key": API_KEY},
+        )
+        confirm_target, confirm_token = background_calls.pop()
+        confirm_target(confirm_token)
+        cancelled = client.post(
+            "/api/filaments/service/swap/cancel",
+            headers={"X-Api-Key": API_KEY},
+        )
+    finally:
+        _restore_state(old_values, old_svc, old_filaments, old_swap)
+
+    assert started.status_code == 200
+    assert started.get_json()["pending"] is True
+    assert started.get_json()["swap"]["mode"] == "legacy"
+    assert mismatch.status_code == 409
+    assert confirmed.status_code == 200
+    assert confirmed.get_json()["pending"] is True
+    assert cancelled.status_code == 200
+    assert cancelled.get_json()["pending"] is False
+    assert "G1 E-40 F2400" in sent[0]
+    assert "G1 E55 F720" in sent[1]

@@ -84,9 +84,39 @@ app.pppp_probe = {
     "client_count": 0,       # active WS clients watching pppp-state
 }
 
-# Configurable upload size limit (default: 2 GB)
-max_upload_mb = int(os.getenv("UPLOAD_MAX_MB", "2048"))
-app.config['MAX_CONTENT_LENGTH'] = max_upload_mb * 1024 * 1024
+
+def _env_int(name, default, min_value=1, env=None):
+    env = os.environ if env is None else env
+    raw = env.get(name)
+    if raw in (None, ""):
+        return default
+
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        log.warning("Ignoring invalid integer value for %s: %r", name, raw)
+        return default
+
+    if value < min_value:
+        log.warning("Ignoring %s=%r because it is smaller than %d", name, raw, min_value)
+        return default
+
+    return value
+
+
+def _configure_request_limits(flask_app, env=None):
+    # Keep large GCode uploads configurable, but bound multipart metadata more
+    # tightly. These form limits apply to multipart parsing, not the file size.
+    max_upload_mb = _env_int("UPLOAD_MAX_MB", 2048, env=env)
+    max_form_memory_kb = _env_int("UPLOAD_MAX_FORM_MEMORY_KB", 512, env=env)
+    max_form_parts = _env_int("UPLOAD_MAX_FORM_PARTS", 20, env=env)
+
+    flask_app.config["MAX_CONTENT_LENGTH"] = max_upload_mb * 1024 * 1024
+    flask_app.config["MAX_FORM_MEMORY_SIZE"] = max_form_memory_kb * 1024
+    flask_app.config["MAX_FORM_PARTS"] = max_form_parts
+
+
+_configure_request_limits(app)
 
 # Session cookie security
 app.config['SESSION_COOKIE_SAMESITE'] = 'Strict'
@@ -131,12 +161,21 @@ def _resolve_apprise(cfg):
     return apprise
 
 
+def _resolve_filament_service_settings(cfg):
+    return merge_dict_defaults(
+        getattr(cfg, "filament_service", None),
+        cli.model.default_filament_service_config(),
+    )
+
+
 FILAMENT_SERVICE_DEFAULT_LENGTH_MM = 40.0
 FILAMENT_SERVICE_MAX_LENGTH_MM = 300.0
 FILAMENT_SERVICE_FEEDRATE_MM_MIN = 240
 FILAMENT_SERVICE_HEAT_TIMEOUT_S = 240.0
 FILAMENT_SERVICE_HEAT_POLL_S = 0.5
 FILAMENT_SERVICE_HEAT_TOLERANCE_C = 5
+FILAMENT_SERVICE_MANUAL_SWAP_MIN_TEMP_C = 130
+FILAMENT_SERVICE_MANUAL_SWAP_MAX_TEMP_C = 150
 Z_OFFSET_STEP_MM = 0.01
 Z_OFFSET_REFRESH_TIMEOUT_S = 5.0
 Z_OFFSET_CONFIRM_TIMEOUT_S = 8.0
@@ -187,15 +226,32 @@ def _format_extrusion_mm(length_mm):
     return text or "0"
 
 
-def _build_filament_move_gcode(temp_c, delta_mm):
+def _filament_service_feedrate_mm_min(profile, action):
+    defaults_mm_s = {
+        "extrude": 10.0,
+        "retract": 35.0,
+        "unload": 35.0,
+        "load": 10.0,
+    }
+    try:
+        feedrate_mm_s = float(profile.get("retract_speed", defaults_mm_s[action]))
+    except (AttributeError, TypeError, ValueError, KeyError):
+        feedrate_mm_s = defaults_mm_s.get(action, 10.0)
+
+    if action in {"extrude", "load"}:
+        feedrate_mm_s = max(5.0, min(feedrate_mm_s, 15.0))
+    else:
+        feedrate_mm_s = max(15.0, min(feedrate_mm_s, 60.0))
+    return int(round(feedrate_mm_s * 60))
+
+
+def _build_filament_move_gcode(temp_c, delta_mm, feedrate_mm_min=FILAMENT_SERVICE_FEEDRATE_MM_MIN):
     extrusion = _format_extrusion_mm(delta_mm)
     return "\n".join([
         "M83",
-        "G92 E0",
-        f"G1 E{extrusion} F{FILAMENT_SERVICE_FEEDRATE_MM_MIN}",
-        "G92 E0",
-        "M82",
+        f"G1 E{extrusion} F{int(feedrate_mm_min)}",
         "M400",
+        "M82",
     ])
 
 
@@ -207,6 +263,10 @@ def _serialize_filament_swap_state(state):
         "swap": {
             "token": state["token"],
             "created_at": state["created_at"],
+            "mode": state.get("mode", "legacy"),
+            "phase": state.get("phase", "await_manual_swap"),
+            "message": state.get("message"),
+            "error": state.get("error"),
             "unload_profile_id": state["unload_profile_id"],
             "unload_profile_name": state["unload_profile_name"],
             "load_profile_id": state["load_profile_id"],
@@ -215,8 +275,45 @@ def _serialize_filament_swap_state(state):
             "load_temp_c": state["load_temp_c"],
             "unload_length_mm": state["unload_length_mm"],
             "load_length_mm": state["load_length_mm"],
+            "manual_swap_preheat_temp_c": state.get("manual_swap_preheat_temp_c"),
         },
     }
+
+
+def _filament_swap_state_get(token=None):
+    with app.filament_swap_lock:
+        state = app.filament_swap_state
+        if state is None:
+            return None
+        if token is not None and state.get("token") != token:
+            return None
+        return dict(state)
+
+
+def _filament_swap_state_update(token, **updates):
+    with app.filament_swap_lock:
+        state = app.filament_swap_state
+        if state is None or state.get("token") != token:
+            return None
+        state.update(updates)
+        return dict(state)
+
+
+def _filament_swap_state_clear(token=None):
+    with app.filament_swap_lock:
+        state = app.filament_swap_state
+        if state is None:
+            return None
+        if token is not None and state.get("token") != token:
+            return None
+        app.filament_swap_state = None
+        return dict(state)
+
+
+def _filament_swap_start_background(target, token):
+    thread = threading.Thread(target=target, args=(token,), daemon=True)
+    thread.start()
+    return thread
 
 
 def _send_filament_service_gcode(gcode):
@@ -259,6 +356,112 @@ def _wait_for_filament_service_nozzle(mqtt, target_temp_c):
         f"Nozzle did not reach {int(target_temp_c)}°C within {int(FILAMENT_SERVICE_HEAT_TIMEOUT_S)}s "
         f"(last seen: {last_temp if last_temp is not None else 'unknown'}°C)"
     )
+
+
+def _filament_service_manual_swap_temp(settings):
+    raw_temp = settings.get("manual_swap_preheat_temp_c", 140)
+    try:
+        temp_c = int(raw_temp)
+    except (TypeError, ValueError):
+        temp_c = 140
+    return max(FILAMENT_SERVICE_MANUAL_SWAP_MIN_TEMP_C, min(FILAMENT_SERVICE_MANUAL_SWAP_MAX_TEMP_C, temp_c))
+
+
+def _run_legacy_swap_unload(token):
+    state = _filament_swap_state_get(token)
+    if not state:
+        return
+
+    try:
+        gcode = _build_filament_move_gcode(
+            state["unload_temp_c"],
+            -state["unload_length_mm"],
+            feedrate_mm_min=state.get("unload_feedrate_mm_min", FILAMENT_SERVICE_FEEDRATE_MM_MIN),
+        )
+        with app.svc.borrow("mqttqueue") as mqtt:
+            _assert_filament_service_ready(mqtt)
+            current_temp = mqtt.nozzle_temp
+            if current_temp is None or current_temp < (state["unload_temp_c"] - FILAMENT_SERVICE_HEAT_TOLERANCE_C):
+                _filament_swap_state_update(
+                    token,
+                    phase="heating_unload",
+                    message=f"Heating nozzle to {state['unload_temp_c']}°C for unload...",
+                    error=None,
+                )
+                mqtt.send_gcode(f"M104 S{state['unload_temp_c']}")
+                _wait_for_filament_service_nozzle(mqtt, state["unload_temp_c"])
+
+            _filament_swap_state_update(
+                token,
+                phase="unloading",
+                message=(
+                    f"Retracting {state['unload_length_mm']} mm for {state['unload_profile_name']}..."
+                ),
+                error=None,
+            )
+            mqtt.send_gcode(gcode)
+
+        _filament_swap_state_update(
+            token,
+            phase="await_manual_swap",
+            message=(
+                "Unload finished. Release the extruder lever, remove the old filament, "
+                "insert the new filament, then confirm."
+            ),
+            error=None,
+        )
+    except (RuntimeError, TimeoutError, ConnectionError) as exc:
+        _filament_swap_state_update(
+            token,
+            phase="error",
+            message=f"Automatic unload failed: {exc}",
+            error=str(exc),
+        )
+
+
+def _run_legacy_swap_load(token):
+    state = _filament_swap_state_get(token)
+    if not state:
+        return
+
+    try:
+        gcode = _build_filament_move_gcode(
+            state["load_temp_c"],
+            state["load_length_mm"],
+            feedrate_mm_min=state.get("load_feedrate_mm_min", FILAMENT_SERVICE_FEEDRATE_MM_MIN),
+        )
+        with app.svc.borrow("mqttqueue") as mqtt:
+            _assert_filament_service_ready(mqtt)
+            current_temp = mqtt.nozzle_temp
+            if current_temp is None or current_temp < (state["load_temp_c"] - FILAMENT_SERVICE_HEAT_TOLERANCE_C):
+                _filament_swap_state_update(
+                    token,
+                    phase="heating_load",
+                    message=f"Heating nozzle to {state['load_temp_c']}°C for load / purge...",
+                    error=None,
+                )
+                mqtt.send_gcode(f"M104 S{state['load_temp_c']}")
+                _wait_for_filament_service_nozzle(mqtt, state["load_temp_c"])
+
+            _filament_swap_state_update(
+                token,
+                phase="loading",
+                message=(
+                    f"Loading / purging {state['load_profile_name']} "
+                    f"({state['load_length_mm']} mm)..."
+                ),
+                error=None,
+            )
+            mqtt.send_gcode(gcode)
+
+        _filament_swap_state_clear(token)
+    except (RuntimeError, TimeoutError, ConnectionError) as exc:
+        _filament_swap_state_update(
+            token,
+            phase="error",
+            message=f"Automatic load / purge failed: {exc}",
+            error=str(exc),
+        )
 
 
 def _z_offset_steps_to_mm(steps):
@@ -1201,6 +1404,49 @@ def app_api_settings_mqtt_update():
     return {"status": "ok", "home_assistant": new_config}
 
 
+@app.get("/api/settings/filament-service")
+def app_api_settings_filament_service():
+    config = app.config["config"]
+    with config.open() as cfg:
+        if not cfg:
+            return {"error": "No printers configured"}, 400
+        filament_config = _resolve_filament_service_settings(cfg)
+
+    filament_config["manual_swap_preheat_temp_c"] = _filament_service_manual_swap_temp(filament_config)
+    return {"filament_service": filament_config}
+
+
+@app.post("/api/settings/filament-service")
+def app_api_settings_filament_service_update():
+    config = app.config["config"]
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return {"error": "Invalid JSON payload"}, 400
+
+    fs_payload = payload.get("filament_service") if "filament_service" in payload else payload
+    if not isinstance(fs_payload, dict):
+        return {"error": "Invalid filament_service payload"}, 400
+
+    if "allow_legacy_swap" in fs_payload:
+        fs_payload["allow_legacy_swap"] = bool(fs_payload["allow_legacy_swap"])
+    if "manual_swap_preheat_temp_c" in fs_payload:
+        try:
+            fs_payload["manual_swap_preheat_temp_c"] = int(fs_payload["manual_swap_preheat_temp_c"])
+        except (TypeError, ValueError):
+            return {"error": "manual_swap_preheat_temp_c must be an integer"}, 400
+
+    with config.modify() as cfg:
+        if not cfg:
+            return {"error": "No printers configured"}, 400
+
+        current = _resolve_filament_service_settings(cfg)
+        new_config = _deep_update(current, fs_payload)
+        new_config["manual_swap_preheat_temp_c"] = _filament_service_manual_swap_temp(new_config)
+        cfg.filament_service = new_config
+
+    return {"status": "ok", "filament_service": new_config}
+
+
 # GCode prefixes that are unsafe to send while a print is active
 _UNSAFE_GCODE_PREFIXES = {"G0", "G1", "G28", "G29", "G91", "G90"}
 
@@ -1887,7 +2133,11 @@ def app_api_filament_service_move():
         temp_c = _filament_service_temp(profile)
         length_mm = _filament_service_length(payload, "length_mm")
         delta_mm = length_mm if action == "extrude" else -length_mm
-        gcode = _build_filament_move_gcode(temp_c, delta_mm)
+        gcode = _build_filament_move_gcode(
+            temp_c,
+            delta_mm,
+            feedrate_mm_min=_filament_service_feedrate_mm_min(profile, action),
+        )
         with app.svc.borrow("mqttqueue") as mqtt:
             _assert_filament_service_ready(mqtt)
             current_temp = mqtt.nozzle_temp
@@ -1922,60 +2172,101 @@ def app_api_filament_service_move():
 @app.post("/api/filaments/service/swap/start")
 def app_api_filament_service_swap_start():
     payload = request.get_json(silent=True) or {}
-    try:
-        unload_profile = _filament_service_profile(payload, "unload_profile_id")
-        load_profile = _filament_service_profile(payload, "load_profile_id")
-        unload_temp_c = _filament_service_temp(unload_profile)
-        load_temp_c = _filament_service_temp(load_profile)
-        unload_length_mm = _filament_service_length(payload, "unload_length_mm")
-        load_length_mm = _filament_service_length(payload, "load_length_mm")
-    except ValueError as exc:
-        return {"error": str(exc)}, 400
-    except LookupError as exc:
-        return {"error": str(exc)}, 404
+
+    config = app.config["config"]
+    with config.open() as cfg:
+        if not cfg:
+            return {"error": "No printers configured"}, 400
+        filament_settings = _resolve_filament_service_settings(cfg)
+
+    allow_legacy_swap = bool(filament_settings.get("allow_legacy_swap"))
+    manual_swap_preheat_temp_c = _filament_service_manual_swap_temp(filament_settings)
+
+    unload_profile = None
+    load_profile = None
+    unload_temp_c = manual_swap_preheat_temp_c
+    load_temp_c = manual_swap_preheat_temp_c
+    unload_length_mm = 0.0
+    load_length_mm = 0.0
+    unload_feedrate_mm_min = FILAMENT_SERVICE_FEEDRATE_MM_MIN
+    load_feedrate_mm_min = FILAMENT_SERVICE_FEEDRATE_MM_MIN
+
+    if allow_legacy_swap:
+        try:
+            unload_profile = _filament_service_profile(payload, "unload_profile_id")
+            load_profile = _filament_service_profile(payload, "load_profile_id")
+            unload_temp_c = _filament_service_temp(unload_profile)
+            load_temp_c = _filament_service_temp(load_profile)
+            unload_length_mm = _filament_service_length(payload, "unload_length_mm")
+            load_length_mm = _filament_service_length(payload, "load_length_mm")
+        except ValueError as exc:
+            return {"error": str(exc)}, 400
+        except LookupError as exc:
+            return {"error": str(exc)}, 404
+
+        unload_feedrate_mm_min = _filament_service_feedrate_mm_min(unload_profile, "unload")
+        load_feedrate_mm_min = _filament_service_feedrate_mm_min(load_profile, "load")
 
     with app.filament_swap_lock:
         if app.filament_swap_state is not None:
             return {"error": "A filament swap is already in progress"}, 409
 
-    gcode = _build_filament_move_gcode(unload_temp_c, -unload_length_mm)
-    try:
-        with app.svc.borrow("mqttqueue") as mqtt:
-            _assert_filament_service_ready(mqtt)
-            current_temp = mqtt.nozzle_temp
-            if current_temp is None or current_temp < (unload_temp_c - FILAMENT_SERVICE_HEAT_TOLERANCE_C):
-                mqtt.send_gcode(f"M104 S{unload_temp_c}")
-                _wait_for_filament_service_nozzle(mqtt, unload_temp_c)
-            mqtt.send_gcode(gcode)
-    except RuntimeError as exc:
-        return {"error": str(exc)}, 409
-    except TimeoutError as exc:
-        return {"error": str(exc)}, 504
-    except ConnectionError as exc:
-        return {"error": str(exc)}, 503
-
     swap_state = {
         "token": token(12),
         "created_at": int(time.time()),
-        "unload_profile_id": unload_profile["id"],
-        "unload_profile_name": unload_profile["name"],
-        "load_profile_id": load_profile["id"],
-        "load_profile_name": load_profile["name"],
+        "mode": "legacy" if allow_legacy_swap else "manual",
+        "phase": "heating_unload" if allow_legacy_swap else "await_manual_swap",
+        "message": None,
+        "error": None,
+        "unload_profile_id": unload_profile["id"] if unload_profile else None,
+        "unload_profile_name": unload_profile["name"] if unload_profile else None,
+        "load_profile_id": load_profile["id"] if load_profile else None,
+        "load_profile_name": load_profile["name"] if load_profile else None,
         "unload_temp_c": unload_temp_c,
         "load_temp_c": load_temp_c,
         "unload_length_mm": unload_length_mm,
         "load_length_mm": load_length_mm,
+        "manual_swap_preheat_temp_c": manual_swap_preheat_temp_c,
+        "unload_feedrate_mm_min": unload_feedrate_mm_min,
+        "load_feedrate_mm_min": load_feedrate_mm_min,
     }
+
+    if allow_legacy_swap:
+        swap_state["message"] = (
+            f"Heating for automatic unload of {unload_profile['name']} "
+            f"at {unload_temp_c}°C."
+        )
+    else:
+        swap_state["message"] = (
+            f"Recommended method enabled: preheating nozzle to {manual_swap_preheat_temp_c}°C. "
+            "Release the extruder lever, remove the filament manually, insert the new filament, "
+            "then confirm. Use Quick Extrude afterward if you need to purge."
+        )
+
     with app.filament_swap_lock:
         app.filament_swap_state = swap_state
 
+    try:
+        with app.svc.borrow("mqttqueue") as mqtt:
+            _assert_filament_service_ready(mqtt)
+            if allow_legacy_swap:
+                _filament_swap_start_background(_run_legacy_swap_unload, swap_state["token"])
+            else:
+                mqtt.send_gcode(f"M104 S{manual_swap_preheat_temp_c}")
+    except RuntimeError as exc:
+        _filament_swap_state_clear(swap_state["token"])
+        return {"error": str(exc)}, 409
+    except TimeoutError as exc:
+        _filament_swap_state_clear(swap_state["token"])
+        return {"error": str(exc)}, 504
+    except ConnectionError as exc:
+        _filament_swap_state_clear(swap_state["token"])
+        return {"error": str(exc)}, 503
+
     return {
         "status": "ok",
-        "message": (
-            f"Unload started for {unload_profile['name']}. "
-            f"Swap the filament, then confirm to load {load_profile['name']}."
-        ),
-        "gcode": gcode,
+        "message": swap_state["message"],
+        "gcode": f"M104 S{manual_swap_preheat_temp_c}" if not allow_legacy_swap else None,
         **_serialize_filament_swap_state(swap_state),
     }
 
@@ -1990,36 +2281,47 @@ def app_api_filament_service_swap_confirm():
         provided_token = payload.get("token")
         if provided_token and provided_token != swap_state["token"]:
             return {"error": "Swap token mismatch"}, 409
+        if swap_state.get("phase") in {"heating_unload", "unloading", "heating_load", "loading"}:
+            return {"error": "Swap stage is still running; wait for it to finish first"}, 409
 
-    gcode = _build_filament_move_gcode(swap_state["load_temp_c"], swap_state["load_length_mm"])
+    if swap_state.get("mode") == "manual":
+        completed_swap = _filament_swap_state_clear(swap_state["token"])
+        return {
+            "status": "ok",
+            "message": (
+                "Manual swap marked complete. If needed, use Quick Extrude to prime "
+                "the new filament."
+            ),
+            "completed_swap": completed_swap,
+            "pending": False,
+            "swap": None,
+        }
+
+    _filament_swap_state_update(
+        swap_state["token"],
+        phase="heating_load",
+        message=(
+            f"Heating for automatic load / purge of {swap_state['load_profile_name']} "
+            f"at {swap_state['load_temp_c']}°C."
+        ),
+        error=None,
+    )
     try:
         with app.svc.borrow("mqttqueue") as mqtt:
             _assert_filament_service_ready(mqtt)
-            current_temp = mqtt.nozzle_temp
-            if current_temp is None or current_temp < (swap_state["load_temp_c"] - FILAMENT_SERVICE_HEAT_TOLERANCE_C):
-                mqtt.send_gcode(f"M104 S{swap_state['load_temp_c']}")
-                _wait_for_filament_service_nozzle(mqtt, swap_state["load_temp_c"])
-            mqtt.send_gcode(gcode)
     except RuntimeError as exc:
+        _filament_swap_state_update(swap_state["token"], phase="error", message=str(exc), error=str(exc))
         return {"error": str(exc)}, 409
-    except TimeoutError as exc:
-        return {"error": str(exc)}, 504
     except ConnectionError as exc:
+        _filament_swap_state_update(swap_state["token"], phase="error", message=str(exc), error=str(exc))
         return {"error": str(exc)}, 503
 
-    with app.filament_swap_lock:
-        app.filament_swap_state = None
-
+    _filament_swap_start_background(_run_legacy_swap_load, swap_state["token"])
+    current_state = _filament_swap_state_get(swap_state["token"])
     return {
         "status": "ok",
-        "message": (
-            f"Load / purge started for {swap_state['load_profile_name']} "
-            f"at {swap_state['load_temp_c']}°C."
-        ),
-        "gcode": gcode,
-        "completed_swap": swap_state,
-        "pending": False,
-        "swap": None,
+        "message": current_state["message"],
+        **_serialize_filament_swap_state(current_state),
     }
 
 
@@ -2033,6 +2335,8 @@ def app_api_filament_service_swap_cancel():
         provided_token = payload.get("token")
         if provided_token and provided_token != swap_state["token"]:
             return {"error": "Swap token mismatch"}, 409
+        if swap_state.get("phase") in {"heating_unload", "unloading", "heating_load", "loading"}:
+            return {"error": "Cannot cancel while an automatic swap stage is running"}, 409
         app.filament_swap_state = None
 
     return {
@@ -2313,6 +2617,7 @@ _PROTECTED_GET_PATHS = {
     "/api/debug/services",
     # Sensitive credential exposure: HA MQTT password, Apprise URLs/keys
     "/api/settings/mqtt",
+    "/api/settings/filament-service",
     "/api/notifications/settings",
     # Exposes printer serial numbers, IP addresses, and MAC addresses
     "/api/printers",
