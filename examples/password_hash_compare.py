@@ -42,7 +42,8 @@ def main():
         trace_path = "tmp/login_request.full.json"
 
     try:
-        trace_pw = json.load(open(trace_path))["password"]
+        with open(trace_path) as f:
+            trace_pw = json.load(f)["password"]
     except Exception as exc:
         print(f"Failed to read trace password from {trace_path}: {exc}", file=sys.stderr)
         return 2
