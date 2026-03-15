@@ -78,7 +78,8 @@ class BaseConfigManager:
         if not path.exists():
             return default
 
-        return json.load(path.open(), object_hook=self._load_json)
+        with path.open() as f:
+            return json.load(f, object_hook=self._load_json)
 
     def save(self, name, value):
         path = self.config_path(name)
@@ -269,7 +270,8 @@ def merge_config_preferences(existing, new_config):
 
 def attempt_config_upgrade(config, profile, insecure):
     path = config.config_path("default")
-    data = json.load(path.open())
+    with path.open() as f:
+        data = json.load(f)
     cfg = load_config_from_api(
         data["account"]["auth_token"],
         data["account"]["region"],
