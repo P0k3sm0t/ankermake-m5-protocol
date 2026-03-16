@@ -34,6 +34,7 @@ import os
 import shutil
 import threading
 import time
+from contextlib import contextmanager
 
 log = logging.getLogger("web")
 
@@ -138,6 +139,49 @@ PRINTERS_WITHOUT_CAMERA = ["V8110"]
 # When the active printer matches one of these model codes, all services are
 # suppressed and printer-control API endpoints return 503.
 UNSUPPORTED_PRINTERS = ["V8260"]
+
+MQTT_SERVICE_PREFIX = "mqttqueue:"
+
+
+def mqtt_service_name(printer_index=None):
+    if printer_index is None:
+        printer_index = app.config.get("printer_index", 0)
+    return f"{MQTT_SERVICE_PREFIX}{printer_index}"
+
+
+@contextmanager
+def borrow_mqtt(printer_index=None):
+    with app.svc.borrow(mqtt_service_name(printer_index)) as mqtt:
+        yield mqtt
+
+
+def stream_mqtt(printer_index=None):
+    return app.svc.stream(mqtt_service_name(printer_index))
+
+
+def get_mqtt_service(printer_index=None):
+    return app.svc.svcs.get(mqtt_service_name(printer_index))
+
+
+def iter_mqtt_services():
+    for name, svc in app.svc.svcs.items():
+        if name.startswith(MQTT_SERVICE_PREFIX):
+            yield name, svc
+
+
+def _stop_switchable_services():
+    vq = app.svc.svcs.get("videoqueue")
+    if vq:
+        vq.set_video_enabled(False)
+        vq.stop()
+        try:
+            vq.await_stopped()
+        except Exception:
+            pass
+
+    pppp = app.svc.svcs.get("pppp")
+    if pppp:
+        pppp.stop()
 
 
 def _deep_update(base, updates):
@@ -324,7 +368,7 @@ def _filament_swap_start_background(target, token):
 
 
 def _send_filament_service_gcode(gcode):
-    with app.svc.borrow("mqttqueue") as mqtt:
+    with borrow_mqtt() as mqtt:
         if not mqtt:
             raise ConnectionError("MQTT service unavailable")
         if mqtt.is_printing:
@@ -384,7 +428,7 @@ def _run_legacy_swap_unload(token):
             -state["unload_length_mm"],
             feedrate_mm_min=state.get("unload_feedrate_mm_min", FILAMENT_SERVICE_FEEDRATE_MM_MIN),
         )
-        with app.svc.borrow("mqttqueue") as mqtt:
+        with borrow_mqtt() as mqtt:
             _assert_filament_service_ready(mqtt)
             current_temp = mqtt.nozzle_temp
             if current_temp is None or current_temp < (state["unload_temp_c"] - FILAMENT_SERVICE_HEAT_TOLERANCE_C):
@@ -435,7 +479,7 @@ def _run_legacy_swap_load(token):
             state["load_length_mm"],
             feedrate_mm_min=state.get("load_feedrate_mm_min", FILAMENT_SERVICE_FEEDRATE_MM_MIN),
         )
-        with app.svc.borrow("mqttqueue") as mqtt:
+        with borrow_mqtt() as mqtt:
             _assert_filament_service_ready(mqtt)
             current_temp = mqtt.nozzle_temp
             if current_temp is None or current_temp < (state["load_temp_c"] - FILAMENT_SERVICE_HEAT_TOLERANCE_C):
@@ -581,7 +625,7 @@ def mqtt(sock):
     if not app.config["login"] or app.config.get("unsupported_device"):
         return
 
-    for data in app.svc.stream("mqttqueue"):
+    for data in stream_mqtt():
         log.debug(f"MQTT message: {data}")
         sock.send(json.dumps(data))
 
@@ -704,7 +748,7 @@ def pppp_state(sock):
                     app.pppp_probe["fail_count"] = 0
             else:
                 # Check MQTT staleness and detect recovery transition
-                mqtt_svc = app.svc.svcs.get("mqttqueue")
+                mqtt_svc = get_mqtt_service()
                 mqtt_last = getattr(mqtt_svc, "last_message_time", 0.0) if mqtt_svc else 0.0
                 mqtt_stale = mqtt_last > 0 and (now - mqtt_last) > MQTT_STALE_AFTER
 
@@ -1019,7 +1063,7 @@ def app_api_printers_lan_search():
 
 @app.post("/api/printers/active")
 def app_api_set_active_printer():
-    """Switch the active printer. Blocked when PRINTER_INDEX env var is set or during a print."""
+    """Switch the active printer. Blocked when PRINTER_INDEX env var is set."""
     if app.config.get("printer_index_locked"):
         return jsonify({"error": "Printer selection locked by PRINTER_INDEX environment variable"}), 403
 
@@ -1039,16 +1083,9 @@ def app_api_set_active_printer():
                 "error": f"Device {cfg.printers[new_index].model} is not supported by ankerctl"
             }), 403
 
-        # Block switch during active print
-        try:
-            with app.svc.borrow("mqttqueue") as mqtt:
-                if mqtt.is_printing:
-                    return jsonify({"error": "Cannot switch printer during an active print"}), 409
-        except Exception:
-            pass  # mqttqueue may not be running
-
         printer = cfg.printers[new_index]
         video_supported = printer.model not in PRINTERS_WITHOUT_CAMERA
+        unsupported = printer.model in UNSUPPORTED_PRINTERS
 
     old_index = app.config["printer_index"]
     if new_index == old_index:
@@ -1057,16 +1094,20 @@ def app_api_set_active_printer():
     # Update in-memory state
     app.config["printer_index"] = new_index
     app.config["video_supported"] = video_supported
+    app.config["unsupported_device"] = unsupported
 
     # Persist selection to config file
     with config.modify() as cfg:
         cfg.active_printer_index = new_index
 
-    # Restart all services so they reconnect to the new printer
+    register_services(app)
+
+    # MQTT observers stay bound per printer. Only reset the services that
+    # follow the currently selected printer for camera / PPPP access.
     try:
-        app.svc.restart_all(await_ready=False)
+        _stop_switchable_services()
     except Exception as err:
-        log.warning(f"Service restart after printer switch raised: {err}")
+        log.warning(f"Service reset after printer switch raised: {err}")
 
     log.info(f"Switched active printer: index {old_index} -> {new_index} ({printer.name})")
     return jsonify({"status": "ok", "printer": {"index": new_index, "name": printer.name, "sn": printer.sn}})
@@ -1155,29 +1196,23 @@ def app_api_ankerctl_server_reload():
 
     with config.open() as cfg:
         app.config["login"] = bool(cfg)
-        app.config["video_supported"] = any(
-            printer.model not in PRINTERS_WITHOUT_CAMERA for printer in (cfg.printers if cfg else [])
-        )
         if not cfg:
             return web.util.flash_redirect(url_for('app_root'), "No printers found in config", "warning")
         if "_flashes" in session:
             session["_flashes"].clear()
 
-        # Detect unsupported active device and suppress services
         printer_index = app.config.get("printer_index", 0)
         active_model = cfg.printers[printer_index].model if printer_index < len(cfg.printers) else None
+        app.config["video_supported"] = bool(active_model and active_model not in PRINTERS_WITHOUT_CAMERA)
         unsupported = active_model in UNSUPPORTED_PRINTERS
         app.config["unsupported_device"] = unsupported
         if unsupported:
             log.warning(
                 f"Active device {active_model} is not supported by ankerctl — "
-                "stopping all services and suppressing restart."
+                "only supported printers will get background MQTT observers."
             )
-            for svc in app.svc.svcs.values():
-                svc.stop()
-            return web.util.flash_redirect(url_for('app_root'), "Ankerctl reloaded successfully", "success")
 
-        if cfg and not app.svc.svcs:
+        if not app.svc.svcs:
             register_services(app)
 
         try:
@@ -1359,8 +1394,8 @@ def app_api_settings_timelapse_update():
         new_config = _deep_update(current, tl_payload)
         cfg.timelapse = new_config
 
-    # Reload service
-    with app.svc.borrow("mqttqueue") as mqtt:
+    # Reload all printer-local timelapse helpers.
+    for _, mqtt in iter_mqtt_services():
         if mqtt and mqtt.timelapse:
             mqtt.timelapse.reload_config(config)
 
@@ -1402,8 +1437,8 @@ def app_api_settings_mqtt_update():
         new_config = _deep_update(current, ha_payload)
         cfg.home_assistant = new_config
 
-    # Reload service
-    with app.svc.borrow("mqttqueue") as mqtt:
+    # Reload all printer-local Home Assistant bridges.
+    for _, mqtt in iter_mqtt_services():
         if mqtt and mqtt.ha:
             mqtt.ha.reload_config(config)
 
@@ -1476,7 +1511,7 @@ def app_api_printer_gcode():
 
     normalized_gcode = "\n".join(lines)
 
-    with app.svc.borrow("mqttqueue") as mqtt:
+    with borrow_mqtt() as mqtt:
         if mqtt.is_printing:
             unsafe = [l for l in lines if l.split()[0].upper() in _UNSAFE_GCODE_PREFIXES]
             if unsafe:
@@ -1497,7 +1532,7 @@ def app_api_printer_control():
     except (ValueError, TypeError):
         return {"error": "Value must be an integer"}, 400
 
-    with app.svc.borrow("mqttqueue") as mqtt:
+    with borrow_mqtt() as mqtt:
         mqtt.send_print_control(value)
 
     return {"status": "ok"}
@@ -1505,7 +1540,7 @@ def app_api_printer_control():
 
 @app.post("/api/printer/autolevel")
 def app_api_printer_autolevel():
-    with app.svc.borrow("mqttqueue") as mqtt:
+    with borrow_mqtt() as mqtt:
         if mqtt.is_printing:
             return {"error": "Auto-leveling blocked while printing"}, 409
         mqtt.send_auto_leveling()
@@ -1514,7 +1549,7 @@ def app_api_printer_autolevel():
 
 @app.get("/api/printer/z-offset")
 def app_api_printer_z_offset():
-    with app.svc.borrow("mqttqueue") as mqtt:
+    with borrow_mqtt() as mqtt:
         state = mqtt.get_z_offset_state()
         if not state.get("available"):
             try:
@@ -1529,7 +1564,7 @@ def app_api_printer_z_offset():
 
 @app.post("/api/printer/z-offset/refresh")
 def app_api_printer_z_offset_refresh():
-    with app.svc.borrow("mqttqueue") as mqtt:
+    with borrow_mqtt() as mqtt:
         try:
             state = mqtt.refresh_z_offset(timeout=Z_OFFSET_REFRESH_TIMEOUT_S)
         except TimeoutError as exc:
@@ -1549,7 +1584,7 @@ def app_api_printer_z_offset_set():
     except ValueError as exc:
         return {"error": str(exc)}, 400
 
-    with app.svc.borrow("mqttqueue") as mqtt:
+    with borrow_mqtt() as mqtt:
         try:
             return _set_printer_z_offset(mqtt, target_mm)
         except TimeoutError as exc:
@@ -1564,7 +1599,7 @@ def app_api_printer_z_offset_nudge():
     except ValueError as exc:
         return {"error": str(exc)}, 400
 
-    with app.svc.borrow("mqttqueue") as mqtt:
+    with borrow_mqtt() as mqtt:
         try:
             current = mqtt.refresh_z_offset(timeout=Z_OFFSET_REFRESH_TIMEOUT_S)
             target_mm = round(current["mm"] + delta_mm, 2)
@@ -1824,7 +1859,7 @@ def _build_command_group(commands, keys):
 
 
 def _read_printer_settings_summary():
-    with app.svc.borrow("mqttqueue") as mqtt:
+    with borrow_mqtt() as mqtt:
         live_z_offset = mqtt.get_z_offset_state()
         if not live_z_offset.get("available"):
             try:
@@ -2017,7 +2052,7 @@ def app_api_history():
     # Clamp parameters to safe ranges to prevent excessive queries or errors
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
-    with app.svc.borrow("mqttqueue") as mqtt:
+    with borrow_mqtt() as mqtt:
         if not mqtt:
             return {"entries": [], "total": 0}
         entries = mqtt.history.get_history(limit=limit, offset=offset)
@@ -2028,7 +2063,7 @@ def app_api_history():
 @app.delete("/api/history")
 def app_api_history_clear():
     """Clear all print history."""
-    with app.svc.borrow("mqttqueue") as mqtt:
+    with borrow_mqtt() as mqtt:
         mqtt.history.clear()
     return {"status": "ok"}
 
@@ -2082,7 +2117,7 @@ def app_api_filaments_apply(profile_id):
     nozzle = profile.get("nozzle_temp_first_layer") or profile.get("nozzle_temp_other_layer") or profile.get("nozzle_temp", 0)
     bed    = profile.get("bed_temp_first_layer") or profile.get("bed_temp_other_layer") or profile.get("bed_temp", 0)
     gcode = f"M104 S{nozzle}\nM140 S{bed}"
-    with app.svc.borrow("mqttqueue") as mqtt:
+    with borrow_mqtt() as mqtt:
         mqtt.send_gcode(gcode)
     return {"status": "ok", "gcode": gcode}
 
@@ -2109,7 +2144,7 @@ def app_api_filament_service_preheat():
         profile = _filament_service_profile(payload, "profile_id")
         temp_c = _filament_service_temp(profile)
         gcode = f"M104 S{temp_c}"
-        with app.svc.borrow("mqttqueue") as mqtt:
+        with borrow_mqtt() as mqtt:
             _assert_filament_service_ready(mqtt)
             mqtt.send_gcode(gcode)
     except ValueError as exc:
@@ -2158,7 +2193,7 @@ def app_api_filament_service_move():
             delta_mm,
             feedrate_mm_min=feedrate_mm_min,
         )
-        with app.svc.borrow("mqttqueue") as mqtt:
+        with borrow_mqtt() as mqtt:
             _assert_filament_service_ready(mqtt)
             current_temp = mqtt.nozzle_temp
             wait_for_heat = current_temp is None or current_temp < (temp_c - FILAMENT_SERVICE_HEAT_TOLERANCE_C)
@@ -2273,7 +2308,7 @@ def app_api_filament_service_swap_start():
         app.filament_swap_state = swap_state
 
     try:
-        with app.svc.borrow("mqttqueue") as mqtt:
+        with borrow_mqtt() as mqtt:
             _assert_filament_service_ready(mqtt)
             if allow_legacy_swap:
                 _filament_swap_start_background(_run_legacy_swap_unload, swap_state["token"])
@@ -2333,7 +2368,7 @@ def app_api_filament_service_swap_confirm():
         error=None,
     )
     try:
-        with app.svc.borrow("mqttqueue") as mqtt:
+        with borrow_mqtt() as mqtt:
             _assert_filament_service_ready(mqtt)
     except RuntimeError as exc:
         _filament_swap_state_update(swap_state["token"], phase="error", message=str(exc), error=str(exc))
@@ -2377,7 +2412,7 @@ def app_api_filament_service_swap_cancel():
 @app.get("/api/timelapses")
 def app_api_timelapses():
     """List available timelapse videos."""
-    with app.svc.borrow("mqttqueue") as mqtt:
+    with borrow_mqtt() as mqtt:
         videos = mqtt.timelapse.list_videos()
         enabled = mqtt.timelapse.enabled
     return {"videos": videos, "enabled": enabled}
@@ -2389,7 +2424,7 @@ def app_api_timelapse_download(filename):
     from flask import send_file
     if "/" in filename or "\\" in filename or ".." in filename:
         return jsonify({"error": "invalid filename"}), 400
-    with app.svc.borrow("mqttqueue") as mqtt:
+    with borrow_mqtt() as mqtt:
         path = mqtt.timelapse.get_video_path(filename)
         captures_dir = os.path.realpath(mqtt.timelapse._captures_dir)
     if not path:
@@ -2404,7 +2439,7 @@ def app_api_timelapse_delete(filename):
     """Delete a timelapse video."""
     if "/" in filename or "\\" in filename or ".." in filename:
         return jsonify({"error": "invalid filename"}), 400
-    with app.svc.borrow("mqttqueue") as mqtt:
+    with borrow_mqtt() as mqtt:
         captures_dir = os.path.realpath(mqtt.timelapse._captures_dir)
         path = mqtt.timelapse.get_video_path(filename)
         if not path or not os.path.realpath(path).startswith(captures_dir + os.sep):
@@ -2416,11 +2451,54 @@ def app_api_timelapse_delete(filename):
 
 
 def register_services(app):
-    app.svc.register("pppp", web.service.pppp.PPPPService())
-    if app.config.get("video_supported"):
+    config = app.config.get("config")
+    if not config:
+        return
+
+    with config.open() as cfg:
+        if not cfg:
+            return
+
+        supported_indexes = []
+        any_camera_supported = False
+        for index, printer in enumerate(getattr(cfg, "printers", [])):
+            if printer.model in UNSUPPORTED_PRINTERS:
+                continue
+            supported_indexes.append(index)
+            if printer.model not in PRINTERS_WITHOUT_CAMERA:
+                any_camera_supported = True
+
+    wanted_mqtt_services = {mqtt_service_name(index) for index in supported_indexes}
+    for name, svc in list(iter_mqtt_services()):
+        if name in wanted_mqtt_services:
+            continue
+        svc.stop()
+        try:
+            svc.await_stopped()
+        except Exception:
+            pass
+        if app.svc.refs.get(name, 0) == 0:
+            app.svc.unregister(name)
+        else:
+            log.warning(f"Keeping stale MQTT service {name} registered because it still has active references")
+
+    if not supported_indexes:
+        return
+
+    if "pppp" not in app.svc:
+        app.svc.register("pppp", web.service.pppp.PPPPService())
+    if any_camera_supported and "videoqueue" not in app.svc:
         app.svc.register("videoqueue", web.service.video.VideoQueue())
-    app.svc.register("mqttqueue", web.service.mqtt.MqttQueue())
-    app.svc.register("filetransfer", web.service.filetransfer.FileTransferService())
+    if "filetransfer" not in app.svc:
+        app.svc.register("filetransfer", web.service.filetransfer.FileTransferService())
+
+    for printer_index in supported_indexes:
+        name = mqtt_service_name(printer_index)
+        if name in app.svc:
+            continue
+        svc = web.service.mqtt.MqttQueue(printer_index=printer_index)
+        app.svc.register(name, svc)
+        svc.start()
 
 
 def webserver(config, printer_index, host, port, insecure=False, **kwargs):
@@ -2488,12 +2566,12 @@ def webserver(config, printer_index, host, port, insecure=False, **kwargs):
         app.config["video_supported"] = video_supported
         app.config["unsupported_device"] = unsupported
         app.config.update(kwargs)
-        if cfg and not unsupported:
+        if cfg:
             register_services(app)
-        elif cfg and unsupported:
+        if cfg and unsupported:
             log.warning(
                 f"Active device {active_model} is not supported by ankerctl — "
-                "printer-control services will not be started."
+                "printer-control endpoints stay blocked, but supported printers keep their MQTT observers."
             )
 
     @app.context_processor
@@ -2506,7 +2584,7 @@ def webserver(config, printer_index, host, port, insecure=False, **kwargs):
 if os.getenv("ANKERCTL_DEV_MODE", "false").lower() == "true":
     @app.get("/api/debug/state")
     def app_api_debug_state():
-        with app.svc.borrow("mqttqueue") as mqtt:
+        with borrow_mqtt() as mqtt:
             if not mqtt:
                 return {"error": "Service unavailable"}, 503
             return mqtt.get_state()
@@ -2515,7 +2593,7 @@ if os.getenv("ANKERCTL_DEV_MODE", "false").lower() == "true":
     def app_api_debug_config():
         payload = request.get_json(silent=True) or {}
         debug_logging = payload.get("debug_logging")
-        with app.svc.borrow("mqttqueue") as mqtt:
+        with borrow_mqtt() as mqtt:
             if not mqtt:
                 return {"error": "Service unavailable"}, 503
             if debug_logging is not None:
@@ -2527,7 +2605,7 @@ if os.getenv("ANKERCTL_DEV_MODE", "false").lower() == "true":
         payload = request.get_json(silent=True) or {}
         event_type = payload.get("type")
         event_payload = payload.get("payload") or {}
-        with app.svc.borrow("mqttqueue") as mqtt:
+        with borrow_mqtt() as mqtt:
             if not mqtt:
                 return {"error": "Service unavailable"}, 503
             mqtt.simulate_event(event_type, event_payload)

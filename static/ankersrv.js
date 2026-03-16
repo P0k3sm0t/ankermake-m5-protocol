@@ -3822,7 +3822,7 @@ $(function () {
             // Skip if already active or if the device is unsupported (disabled item)
             if (isNaN(newIndex) || this.classList.contains("active") || this.classList.contains("disabled")) return;
 
-            if (!confirm("Switch printer? All connections will be restarted.")) return;
+            if (!confirm("Switch printer? Camera / PPPP connections may reconnect.")) return;
 
             fetch("/api/printers/active", {
                 method: "POST",
@@ -3837,8 +3837,8 @@ $(function () {
                     alert("Error: " + (r.data.error || "Failed to switch printer"));
                     return;
                 }
-                // Reload after 2.5s to allow services to restart
-                setTimeout(function() { window.location.reload(); }, 2500);
+                // Reload shortly so the UI reconnects to the selected printer.
+                setTimeout(function() { window.location.reload(); }, 1000);
             })
             .catch(function(err) {
                 alert("Failed to switch printer: " + err);

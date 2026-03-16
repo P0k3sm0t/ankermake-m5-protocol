@@ -26,6 +26,14 @@ from .homeassistant import HomeAssistantService
 
 
 class MqttQueue(Service):
+    def __init__(self, printer_index):
+        self.printer_index = printer_index
+        super().__init__()
+        self.persistent = True
+
+    @property
+    def service_name(self):
+        return f"mqttqueue:{self.printer_index}"
 
     def worker_init(self):
         self._notifier = AppriseNotifier(app.config["config"])
@@ -38,7 +46,7 @@ class MqttQueue(Service):
         printer_name = None
         with app.config["config"].open() as cfg:
             if cfg and cfg.printers:
-                printer = cfg.printers[app.config["printer_index"]]
+                printer = cfg.printers[self.printer_index]
                 printer_sn = getattr(printer, "sn", None)
                 printer_name = getattr(printer, "name", None) or "AnkerMake M5"
         self._ha = HomeAssistantService(app.config["config"], printer_sn=printer_sn, printer_name=printer_name)
@@ -63,7 +71,7 @@ class MqttQueue(Service):
     def worker_start(self):
         self.client = cli.mqtt.mqtt_open(
             app.config["config"],
-            app.config["printer_index"],
+            self.printer_index,
             app.config["insecure"]
         )
         self._reset_print_state()

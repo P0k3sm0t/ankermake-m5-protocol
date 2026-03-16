@@ -3,7 +3,7 @@ import time
 import uuid
 
 from ..lib.service import Service
-from .. import app
+from .. import app, borrow_mqtt
 
 from libflagship.pppp import FileTransfer
 from libflagship.ppppapi import FileUploadInfo, PPPPError
@@ -41,7 +41,7 @@ class FileTransferService(Service):
         data = patch_gcode_time(raw)
         if layer_count is not None:
             try:
-                with app.svc.borrow("mqttqueue") as mqtt:
+                with borrow_mqtt() as mqtt:
                     mqtt.set_gcode_layer_count(layer_count)
                 log.info(f"GCode layer count from header: {layer_count}")
             except Exception as e:
