@@ -234,6 +234,28 @@ def test_prepare_state_cancels_on_value_zero_after_stop():
     assert queue.get_state()["print"]["preparing"] is False
 
 
+def test_pending_start_stop_cancels_before_print_becomes_active():
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+    sent = []
+    queue.client = SimpleNamespace(command=lambda payload: sent.append(payload))
+
+    queue.mark_pending_print_start("queued.gcode")
+
+    assert queue.get_state()["print"]["pending_start"] is True
+
+    queue.send_print_control(4)
+    queue._handle_notification({"commandType": 1000, "value": 0})
+
+    assert sent == [{"commandType": 1008, "value": 4}]
+    assert history_calls == [("fail", (), {"filename": "queued.gcode", "reason": "cancelled", "task_id": None})]
+    assert timelapse_calls == [("fail",)]
+    assert events == [("print_failed", {"filename": "queued.gcode", "percent": 0, "elapsed_seconds": "", "remaining_seconds": "", "duration_seconds": "", "elapsed": "", "remaining": "", "duration": "", "reason": "cancelled"}, False)]
+    assert queue.get_state()["print"]["pending_start"] is False
+    assert queue._stop_requested is False
+
+
 def test_build_payload_get_state_and_simulate_event(monkeypatch):
     global ha_updates, history_calls, timelapse_calls, events
     ha_updates, history_calls, timelapse_calls, events = [], [], [], []

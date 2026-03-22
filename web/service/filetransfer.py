@@ -99,6 +99,11 @@ class FileTransferService(Service):
             if start_print:
                 log.info("File upload complete. Requesting print start of job.")
                 api.aabb_request(b"", frametype=FileTransfer.END, timeout=15.0)
+                try:
+                    with borrow_mqtt() as mqtt:
+                        mqtt.mark_pending_print_start(upload_name)
+                except Exception as e:
+                    log.warning(f"Could not mark pending print start in mqttqueue: {e}")
             else:
                 log.info("File upload complete (upload-only)")
         except ConnectionError as e:

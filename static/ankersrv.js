@@ -678,7 +678,7 @@ $(function () {
                         if (uploadName) {
                             $("#print-name").text(uploadName);
                         }
-                        _updatePrintControlButtons(PRINT_STATE.CALIBRATING);
+                        _updatePrintControlButtons(PRINT_STATE.PENDING_START);
                     }
                 } else {
                     uploadMeta.text(uploadName ? `Upload complete: ${uploadName}${sizeText}` : "Upload complete");
@@ -1280,7 +1280,7 @@ $(function () {
     };
 
     // ct=1000 state values
-    const PRINT_STATE = { IDLE: 0, PRINTING: 1, PAUSED: 2, CALIBRATING: 8, STOPPING: 9 };
+    const PRINT_STATE = { IDLE: 0, PRINTING: 1, PAUSED: 2, CALIBRATING: 8, STOPPING: 9, PENDING_START: 10 };
 
     let _currentPrintState = PRINT_STATE.IDLE;
 
@@ -1290,7 +1290,8 @@ $(function () {
         const paused = state === PRINT_STATE.PAUSED;
         const stopping = state === PRINT_STATE.STOPPING;
         const preparing = state === PRINT_STATE.CALIBRATING;
-        const active = printing || paused || preparing || stopping;
+        const pendingStart = state === PRINT_STATE.PENDING_START;
+        const active = printing || paused || preparing || stopping || pendingStart;
         $("#print-pause").toggleClass("d-none", !printing || stopping);
         $("#print-resume").toggleClass("d-none", !paused || stopping);
         $("#print-stop").toggleClass("d-none", !active);
@@ -2102,12 +2103,15 @@ $(function () {
             return false;
         }
         const preparing = _currentPrintState === PRINT_STATE.CALIBRATING;
+        const pendingStart = _currentPrintState === PRINT_STATE.PENDING_START;
         const confirmText = preparing
-            ? "Cancel the pending print before it starts?"
-            : "Are you sure you want to stop the print? This will also turn off heaters.";
+            ? "Cancel the printer prepare phase before the print starts?"
+            : pendingStart
+                ? "Cancel the pending print before it starts?"
+                : "Are you sure you want to stop the print? This will also turn off heaters.";
         if (confirm(confirmText)) {
             sendPrintControl(preparing ? PRINT_CONTROL.PREPARE_CANCEL : PRINT_CONTROL.STOP);
-            if (!preparing) {
+            if (!preparing && !pendingStart) {
                 sendPrinterGCode("M104 S0\nM140 S0\nM106 S0");
             }
             _updatePrintControlButtons(PRINT_STATE.STOPPING);

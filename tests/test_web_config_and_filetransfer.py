@@ -120,7 +120,10 @@ def test_filetransfer_send_file_happy_path(monkeypatch):
     svc._notify_upload = lambda payload: notifications.append(payload)
     svc._notify_apprise_upload = lambda filename, size_bytes, start_print: apprise_calls.append((filename, size_bytes, start_print))
 
-    mqtt = SimpleNamespace(set_gcode_layer_count=lambda count: notifications.append({"layer_count": count}))
+    mqtt = SimpleNamespace(
+        set_gcode_layer_count=lambda count: notifications.append({"layer_count": count}),
+        mark_pending_print_start=lambda filename, task_id=None: notifications.append({"pending_start": filename, "task_id": task_id}),
+    )
     old_svc = app.svc
     old_config = app.config.get("config")
     old_printer_index = app.config.get("printer_index")
@@ -162,5 +165,6 @@ def test_filetransfer_send_file_happy_path(monkeypatch):
     assert any(item.get("layer_count") == 12 for item in notifications if isinstance(item, dict))
     assert any(item.get("status") == "done" and item.get("start_print") is True for item in notifications if isinstance(item, dict))
     assert any(item.get("print_started") is True for item in notifications if isinstance(item, dict))
+    assert any(item.get("pending_start") == "cube.gcode" for item in notifications if isinstance(item, dict))
     assert any(item.get("stopped") is True for item in notifications if isinstance(item, dict))
     assert apprise_calls == [("cube.gcode", 11, True)]
