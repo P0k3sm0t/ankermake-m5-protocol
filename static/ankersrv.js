@@ -23,9 +23,18 @@ $(function () {
         $("[data-clipboard-src]").each(function (i, elm) {
             $(elm).on("click", function () {
                 const src = $(elm).attr("data-clipboard-src");
-                const value = $(src).text();
+                if (!/^#[A-Za-z][A-Za-z0-9_:.~-]*$/.test(src || "")) {
+                    console.warn("Ignored invalid clipboard source");
+                    return;
+                }
+                const source = document.getElementById(src.slice(1));
+                if (!source) {
+                    console.warn("Clipboard source not found");
+                    return;
+                }
+                const value = source.textContent || "";
                 navigator.clipboard.writeText(value);
-                console.log(`Copied ${value} to clipboard`);
+                console.log("Copied value to clipboard");
             });
         });
     } else {
@@ -222,19 +231,27 @@ $(function () {
             $(this.badge).removeClass("text-bg-warning text-bg-success text-bg-secondary").addClass("text-bg-danger");
             console.log(`${this.name} close`);
             this.is_open = false;
+            const old = this.ws;
+            this.ws = null;
             if (this.autoReconnect) {
                 setTimeout(() => this.connect(), this.reconnect);
             }
             if (this.close)
-                this.close(this.ws);
+                this.close(old);
         }
 
         _error() {
             console.log(`${this.name} error`);
-            this.ws.close();
+            const old = this.ws;
+            this.ws = null;
             this.is_open = false;
+            try {
+                if (old) {
+                    old.close();
+                }
+            } catch (_) {}
             if (this.error)
-                this.error(this.ws);
+                this.error(old);
         }
 
         _message(event) {
@@ -655,7 +672,17 @@ $(function () {
                 setUploadProgress(100);
                 const total = data.size || uploadSize;
                 const sizeText = total ? ` (${formatBytes(total)})` : "";
-                uploadMeta.text(uploadName ? `Upload complete: ${uploadName}${sizeText}` : "Upload complete");
+                if (data.start_print === true) {
+                    uploadMeta.text(uploadName ? `Upload complete, printer preparing: ${uploadName}${sizeText}` : "Upload complete, printer preparing");
+                    if (_currentPrintState === PRINT_STATE.IDLE) {
+                        if (uploadName) {
+                            $("#print-name").text(uploadName);
+                        }
+                        _updatePrintControlButtons(PRINT_STATE.PENDING_START);
+                    }
+                } else {
+                    uploadMeta.text(uploadName ? `Upload complete: ${uploadName}${sizeText}` : "Upload complete");
+                }
             } else if (data.status === "error") {
                 uploadBar.addClass("bg-danger");
                 setUploadProgress(0);
@@ -690,7 +717,9 @@ $(function () {
         if (videoEnabled) {
             $("#vplayer").show();
             $(this).html('<i class="bi bi-camera-video-off"></i> Disable Video');
-            sockets.ctrl.ws.send(JSON.stringify({ video_enabled: true }));
+            if (sockets.ctrl.ws) {
+                sockets.ctrl.ws.send(JSON.stringify({ video_enabled: true }));
+            }
             sockets.video.autoReconnect = true;
             if (!sockets.video.ws) {
                 sockets.video.connect();
@@ -698,10 +727,14 @@ $(function () {
         } else {
             $("#vplayer").hide();
             $(this).html('<i class="bi bi-camera-video"></i> Enable Video');
-            sockets.ctrl.ws.send(JSON.stringify({ video_enabled: false }));
+            if (sockets.ctrl.ws) {
+                sockets.ctrl.ws.send(JSON.stringify({ video_enabled: false }));
+            }
             sockets.video.autoReconnect = false;
             if (sockets.video.ws) {
-                sockets.video.ws.close();
+                try {
+                    sockets.video.ws.close();
+                } catch (_) {}
                 sockets.video.ws = null;
             }
             $("#video-resolution").text("Current: -");
@@ -1240,13 +1273,14 @@ $(function () {
     }
 
     const PRINT_CONTROL = {
+        PREPARE_CANCEL: 0,
         PAUSE: 2,
         RESUME: 3,
         STOP: 4,
     };
 
     // ct=1000 state values
-    const PRINT_STATE = { IDLE: 0, PRINTING: 1, PAUSED: 2, CALIBRATING: 8 };
+    const PRINT_STATE = { IDLE: 0, PRINTING: 1, PAUSED: 2, CALIBRATING: 8, STOPPING: 9, PENDING_START: 10 };
 
     let _currentPrintState = PRINT_STATE.IDLE;
 
@@ -1254,10 +1288,16 @@ $(function () {
         _currentPrintState = state;
         const printing = state === PRINT_STATE.PRINTING;
         const paused = state === PRINT_STATE.PAUSED;
-        const active = printing || paused;
-        $("#print-pause").toggleClass("d-none", !printing);
-        $("#print-resume").toggleClass("d-none", !paused);
+        const stopping = state === PRINT_STATE.STOPPING;
+        const preparing = state === PRINT_STATE.CALIBRATING;
+        const pendingStart = state === PRINT_STATE.PENDING_START;
+        const active = printing || paused || preparing || stopping || pendingStart;
+        $("#print-pause").toggleClass("d-none", !printing || stopping);
+        $("#print-resume").toggleClass("d-none", !paused || stopping);
         $("#print-stop").toggleClass("d-none", !active);
+        $("#print-pause").prop("disabled", stopping);
+        $("#print-resume").prop("disabled", stopping);
+        $("#print-stop").prop("disabled", stopping);
     }
 
     const getStepDist = () => $('input[name="step-dist"]:checked').val() || "1";
@@ -2059,10 +2099,22 @@ $(function () {
         return false;
     });
     $("#print-stop").on("click", function () {
-        if (confirm("Are you sure you want to stop the print? This will also turn off heaters.")) {
-            sendPrintControl(PRINT_CONTROL.STOP);
-            sendPrinterGCode("M104 S0\nM140 S0\nM106 S0");
-            _updatePrintControlButtons(PRINT_STATE.IDLE);
+        if (_currentPrintState === PRINT_STATE.STOPPING) {
+            return false;
+        }
+        const preparing = _currentPrintState === PRINT_STATE.CALIBRATING;
+        const pendingStart = _currentPrintState === PRINT_STATE.PENDING_START;
+        const confirmText = preparing
+            ? "Cancel the printer prepare phase before the print starts?"
+            : pendingStart
+                ? "Cancel the pending print before it starts?"
+                : "Are you sure you want to stop the print? This will also turn off heaters.";
+        if (confirm(confirmText)) {
+            sendPrintControl(preparing ? PRINT_CONTROL.PREPARE_CANCEL : PRINT_CONTROL.STOP);
+            if (!preparing && !pendingStart) {
+                sendPrinterGCode("M104 S0\nM140 S0\nM106 S0");
+            }
+            _updatePrintControlButtons(PRINT_STATE.STOPPING);
         }
         return false;
     });
@@ -3822,7 +3874,7 @@ $(function () {
             // Skip if already active or if the device is unsupported (disabled item)
             if (isNaN(newIndex) || this.classList.contains("active") || this.classList.contains("disabled")) return;
 
-            if (!confirm("Switch printer? All connections will be restarted.")) return;
+            if (!confirm("Switch printer? Camera / PPPP connections may reconnect.")) return;
 
             fetch("/api/printers/active", {
                 method: "POST",
@@ -3837,8 +3889,8 @@ $(function () {
                     alert("Error: " + (r.data.error || "Failed to switch printer"));
                     return;
                 }
-                // Reload after 2.5s to allow services to restart
-                setTimeout(function() { window.location.reload(); }, 2500);
+                // Reload shortly so the UI reconnects to the selected printer.
+                setTimeout(function() { window.location.reload(); }, 1000);
             })
             .catch(function(err) {
                 alert("Failed to switch printer: " + err);

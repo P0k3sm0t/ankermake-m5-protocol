@@ -53,6 +53,7 @@ class Service(Thread):
     def __init__(self):
         super().__init__()
         self.running = True
+        self.persistent = False
         self.deadline = None
         self.state = RunState.Stopped
         self.wanted = False
@@ -346,6 +347,8 @@ class ServiceManager:
         self.refs[name] -= 1
 
         if not self.refs[name]:
+            if getattr(svc, "persistent", False):
+                return
             if name == "videoqueue" and getattr(svc, "video_enabled", False):
                 return
             svc.stop()

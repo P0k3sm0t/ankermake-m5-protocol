@@ -3,7 +3,7 @@ import time
 import uuid
 
 from ..lib.service import Service
-from .. import app
+from .. import app, borrow_mqtt
 
 from libflagship.pppp import FileTransfer
 from libflagship.ppppapi import FileUploadInfo, PPPPError
@@ -39,9 +39,10 @@ class FileTransferService(Service):
         raw = fd.read()
         layer_count = extract_layer_count(raw)
         data = patch_gcode_time(raw)
+        start_print_flag = bool(start_print)
         if layer_count is not None:
             try:
-                with app.svc.borrow("mqttqueue") as mqtt:
+                with borrow_mqtt() as mqtt:
                     mqtt.set_gcode_layer_count(layer_count)
                 log.info(f"GCode layer count from header: {layer_count}")
             except Exception as e:
@@ -57,7 +58,7 @@ class FileTransferService(Service):
         fui = FileUploadInfo.from_data(data, fd.filename, user_name=user_name, user_id=user_id, machine_id=file_uuid)
         log.info(f"Going to upload {fui.size} bytes as {fui.name!r}")
         upload_name = fui.name
-        self._notify_upload({"status": "start", "name": upload_name, "size": fui.size})
+        self._notify_upload({"status": "start", "name": upload_name, "size": fui.size, "start_print": start_print_flag})
         if rate_limit_mbps:
             log.info(f"Using upload rate limit: {rate_limit_mbps} Mbps")
         pppp_dump = app.config.get("pppp_dump")
@@ -74,6 +75,7 @@ class FileTransferService(Service):
                 "name": upload_name,
                 "size": total,
                 "sent": sent,
+                "start_print": start_print_flag,
             })
         try:
             api = cli.pppp.pppp_open(
@@ -83,7 +85,7 @@ class FileTransferService(Service):
                 dumpfile=pppp_dump,
             )
         except Exception as e:
-            self._notify_upload({"status": "error", "name": upload_name, "error": str(e)})
+            self._notify_upload({"status": "error", "name": upload_name, "error": str(e), "start_print": start_print_flag})
             raise ConnectionError(f"No pppp connection to printer: {e}") from e
         try:
             cli.pppp.pppp_send_file(
@@ -97,19 +99,24 @@ class FileTransferService(Service):
             if start_print:
                 log.info("File upload complete. Requesting print start of job.")
                 api.aabb_request(b"", frametype=FileTransfer.END, timeout=15.0)
+                try:
+                    with borrow_mqtt() as mqtt:
+                        mqtt.mark_pending_print_start(upload_name)
+                except Exception as e:
+                    log.warning(f"Could not mark pending print start in mqttqueue: {e}")
             else:
                 log.info("File upload complete (upload-only)")
         except ConnectionError as e:
             log.error(f"Could not send print job: {e}")
-            self._notify_upload({"status": "error", "name": upload_name, "error": str(e)})
+            self._notify_upload({"status": "error", "name": upload_name, "error": str(e), "start_print": start_print_flag})
             raise
         except (PPPPError, OSError, EOFError, TimeoutError) as e:
             log.error(f"Could not send print job: {e}")
-            self._notify_upload({"status": "error", "name": upload_name, "error": str(e)})
+            self._notify_upload({"status": "error", "name": upload_name, "error": str(e), "start_print": start_print_flag})
             raise ConnectionError(f"PPPP transfer failed: {e}") from e
         except Exception as e:
             log.error(f"Could not send print job: {e}")
-            self._notify_upload({"status": "error", "name": upload_name, "error": str(e)})
+            self._notify_upload({"status": "error", "name": upload_name, "error": str(e), "start_print": start_print_flag})
             raise
         else:
             if start_print:
@@ -121,6 +128,7 @@ class FileTransferService(Service):
                 "name": upload_name,
                 "size": fui.size,
                 "sent": fui.size,
+                "start_print": start_print_flag,
             })
             self._notify_apprise_upload(upload_name, fui.size, start_print)
         finally:
