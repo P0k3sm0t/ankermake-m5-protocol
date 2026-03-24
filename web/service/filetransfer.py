@@ -35,14 +35,14 @@ class FileTransferService(Service):
         except Exception as e:
             log.warning(f"Upload progress notify failed: {e}")
 
-    def send_file(self, fd, user_name, rate_limit_mbps=None, start_print=True):
+    def send_file(self, fd, user_name, rate_limit_mbps=None, start_print=True, printer_index=None):
         raw = fd.read()
         layer_count = extract_layer_count(raw)
         data = patch_gcode_time(raw)
         start_print_flag = bool(start_print)
         if layer_count is not None:
             try:
-                with borrow_mqtt() as mqtt:
+                with borrow_mqtt(printer_index) as mqtt:
                     mqtt.set_gcode_layer_count(layer_count)
                 log.info(f"GCode layer count from header: {layer_count}")
             except Exception as e:
@@ -77,10 +77,11 @@ class FileTransferService(Service):
                 "sent": sent,
                 "start_print": start_print_flag,
             })
+        effective_printer_index = printer_index if printer_index is not None else app.config.get("printer_index", 0)
         try:
             api = cli.pppp.pppp_open(
                 app.config["config"],
-                app.config["printer_index"],
+                effective_printer_index,
                 timeout=self.REPLY_TIMEOUT,
                 dumpfile=pppp_dump,
             )
@@ -100,7 +101,7 @@ class FileTransferService(Service):
                 log.info("File upload complete. Requesting print start of job.")
                 api.aabb_request(b"", frametype=FileTransfer.END, timeout=15.0)
                 try:
-                    with borrow_mqtt() as mqtt:
+                    with borrow_mqtt(printer_index) as mqtt:
                         mqtt.mark_pending_print_start(upload_name)
                 except Exception as e:
                     log.warning(f"Could not mark pending print start in mqttqueue: {e}")

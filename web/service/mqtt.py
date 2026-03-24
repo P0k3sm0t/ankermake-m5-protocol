@@ -31,10 +31,6 @@ class MqttQueue(Service):
         super().__init__()
         self.persistent = True
 
-    @property
-    def service_name(self):
-        return f"mqttqueue:{self.printer_index}"
-
     def worker_init(self):
         self._notifier = AppriseNotifier(app.config["config"])
         config_root = str(app.config["config"].config_root)
@@ -282,8 +278,9 @@ class MqttQueue(Service):
     def worker_stop(self):
         self._ha.update_state(mqtt_connected=False)
         self._ha.stop()
-        del self.client
-        
+        if hasattr(self, "client"):
+            del self.client
+
     def _send_status_query(self):
         cmd = {
             "commandType": MqttMsgType.ZZ_MQTT_CMD_APP_QUERY_STATUS.value,
@@ -527,9 +524,11 @@ class MqttQueue(Service):
         # --- commandType 1000: printer state machine transitions ---
         if command_type == 1000:
             value = payload.get("value")
+            # Update _last_state_value first so that is_preparing_print reflects
+            # the new state when we snapshot it below.
+            self._last_state_value = value
             was_preparing_print = self.is_preparing_print
             was_pending_start = self._pending_print_start
-            self._last_state_value = value
             if value == 1 and not self._print_active:
                 self._pending_print_start = False
                 # Print is now running
@@ -918,6 +917,9 @@ class MqttQueue(Service):
             log.info("Mapping print stop value=4 to value=0 during pre-print preparation")
             value = 0
         if prepare_cancel:
+            # During the pre-print preparation phase (ct=1000 value=8) the printer only
+            # responds to the app-style nested command format. We send both the nested and
+            # the flat format so the cancel lands regardless of which the firmware accepts.
             nested_data = {"value": value}
             if self._control_username:
                 nested_data["userName"] = self._control_username

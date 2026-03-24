@@ -3,9 +3,9 @@ import logging
 import time
 
 from queue import Empty
-from multiprocessing import Queue
 
-_STALL_TIMEOUT = 60.0  # seconds without a frame before forcing restart
+_STALL_TIMEOUT = 60.0  # seconds without a frame before soft restart; 3 failures → ServiceRestartSignal
+_STALL_MAX_RETRIES = 3  # escalate to hard restart after this many consecutive soft-reset failures
 _LIVE_REFRESH_COOLDOWN = 15.0
 
 log = logging.getLogger(__name__)
@@ -171,8 +171,10 @@ class VideoQueue(Service):
         self._live_active = False
         self.api_id = None
         self.pppp = None
+        self._stall_retry_count = 0
 
     def worker_start(self):
+        self._stall_retry_count = 0
         if not self.video_enabled:
             return
         self.pppp = app.svc.get("pppp")
@@ -272,7 +274,14 @@ class VideoQueue(Service):
                                 time.sleep(0.5)
                                 return
                             if not self._start_live_if_needed(force=True):
-                                log.warning("VideoQueue: Failed to restart live stream")
+                                self._stall_retry_count += 1
+                                log.warning(f"VideoQueue: Failed to restart live stream (attempt {self._stall_retry_count}/{_STALL_MAX_RETRIES})")
+                                if self._stall_retry_count >= _STALL_MAX_RETRIES:
+                                    raise ServiceRestartSignal("Video stall recovery exhausted")
+                            else:
+                                self._stall_retry_count = 0
+                        except ServiceRestartSignal:
+                            raise
                         except Exception as exc:
                             log.warning(f"VideoQueue: Failed to refresh live stream ({exc})")
                     time.sleep(0.5)
@@ -295,7 +304,14 @@ class VideoQueue(Service):
                                 time.sleep(0.5)
                                 return
                             if not self._start_live_if_needed(force=True):
-                                log.warning("VideoQueue: Failed to restart live stream for initial-frame recovery")
+                                self._stall_retry_count += 1
+                                log.warning(f"VideoQueue: Failed to restart live stream for initial-frame recovery (attempt {self._stall_retry_count}/{_STALL_MAX_RETRIES})")
+                                if self._stall_retry_count >= _STALL_MAX_RETRIES:
+                                    raise ServiceRestartSignal("Video stall recovery exhausted (no initial frame)")
+                            else:
+                                self._stall_retry_count = 0
+                        except ServiceRestartSignal:
+                            raise
                         except Exception as exc:
                             log.warning(f"VideoQueue: Failed to refresh live stream ({exc})")
                     time.sleep(0.5)

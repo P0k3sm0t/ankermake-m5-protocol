@@ -181,7 +181,8 @@ def borrow_mqtt(printer_index=None):
             continue
     if last_error is not None:
         raise last_error
-    yield None
+    # Unreachable: _mqtt_service_candidates always returns at least one candidate.
+    raise RuntimeError("No MQTT service candidates available")
 
 
 def stream_mqtt(printer_index=None):
@@ -1299,12 +1300,15 @@ def app_api_files_local():
     no_act = not cli.util.parse_http_bool(request.form["print"])
 
     fd = request.files["file"]
+    # Snapshot the active printer index at request time so the upload targets the
+    # correct printer even if the user switches printers mid-transfer.
+    printer_index = app.config.get("printer_index", 0)
     with app.config["config"].open() as cfg:
         rate_limit_mbps, rate_limit_source = cli.util.resolve_upload_rate_mbps_with_source(cfg)
 
     with app.svc.borrow("filetransfer") as ft:
         try:
-            ft.send_file(fd, user_name, rate_limit_mbps=rate_limit_mbps, start_print=not no_act)
+            ft.send_file(fd, user_name, rate_limit_mbps=rate_limit_mbps, start_print=not no_act, printer_index=printer_index)
         except ConnectionError as E:
             log.error(f"Connection error: {E}")
             # This message will be shown in i.e. PrusaSlicer, so attempt to
@@ -2534,15 +2538,17 @@ def register_services(app):
     for name, svc in list(iter_mqtt_services()):
         if name in wanted_mqtt_services:
             continue
+        if app.svc.refs.get(name, 0) > 0:
+            # Active WebSocket handlers are still holding references. Stopping the service
+            # now would close the MQTT connection under them. Skip and retry on next reload.
+            log.warning(f"Skipping stop of MQTT service {name!r}: {app.svc.refs[name]} active reference(s); will retry on next reload")
+            continue
         svc.stop()
         try:
             svc.await_stopped()
         except Exception:
             pass
-        if app.svc.refs.get(name, 0) == 0:
-            app.svc.unregister(name)
-        else:
-            log.warning(f"Keeping stale MQTT service {name} registered because it still has active references")
+        app.svc.unregister(name)
 
     if not supported_indexes:
         return
