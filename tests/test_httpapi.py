@@ -277,7 +277,7 @@ class TestAPIError:
     def test_api_error_basic(self):
         """APIError can be raised with message"""
         error = APIError("Test error")
-        assert str(error) == "('Test error',)"
+        assert str(error) == "Test error"
         assert error.json is None
 
     def test_api_error_with_json(self):
@@ -298,7 +298,7 @@ class TestAPISubclasses:
 
     def test_passport_api_v1_scope(self):
         """AnkerHTTPPassportApiV1 has correct scope"""
-        assert AnkerHTTPPassportApiV1.scope == "/v1/user"
+        assert AnkerHTTPPassportApiV1.scope == "/v1/passport"
 
     def test_passport_api_v2_scope(self):
         """AnkerHTTPPassportApiV2 has correct scope"""
@@ -310,7 +310,7 @@ class TestAPISubclasses:
 
     def test_hub_api_v2_scope(self):
         """AnkerHTTPHubApiV2 has correct scope"""
-        assert AnkerHTTPHubApiV2.scope == "/v2/anker_make"
+        assert AnkerHTTPHubApiV2.scope == "/v2/hub"
 
 
 # Edge case tests

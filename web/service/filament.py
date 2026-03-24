@@ -1,5 +1,6 @@
 """Filament profile store backed by SQLite."""
 
+import os
 import re
 import sqlite3
 import threading
@@ -266,15 +267,35 @@ class FilamentStore:
         conn.row_factory = sqlite3.Row
         return conn
 
+    def _recreate_db_after_corruption(self, exc):
+        db_path = os.fspath(self.db_path)
+        if db_path == ":memory:":
+            raise
+        log.warning("Filament store: database corruption detected at %s: %s. Recreating database.", db_path, exc)
+        try:
+            os.unlink(db_path)
+        except FileNotFoundError:
+            pass
+
     def _init_db(self):
         with self._lock:
-            with self._connect() as conn:
-                conn.executescript(_SCHEMA)
-                self._migrate(conn)
-                count = conn.execute("SELECT COUNT(*) FROM filaments").fetchone()[0]
-                if count == 0:
-                    self._seed_defaults(conn)
-                conn.commit()
+            try:
+                with self._connect() as conn:
+                    conn.executescript(_SCHEMA)
+                    self._migrate(conn)
+                    count = conn.execute("SELECT COUNT(*) FROM filaments").fetchone()[0]
+                    if count == 0:
+                        self._seed_defaults(conn)
+                    conn.commit()
+            except sqlite3.DatabaseError as exc:
+                self._recreate_db_after_corruption(exc)
+                with self._connect() as conn:
+                    conn.executescript(_SCHEMA)
+                    self._migrate(conn)
+                    count = conn.execute("SELECT COUNT(*) FROM filaments").fetchone()[0]
+                    if count == 0:
+                        self._seed_defaults(conn)
+                    conn.commit()
 
     def _migrate(self, conn):
         """Apply incremental schema migrations for existing databases.

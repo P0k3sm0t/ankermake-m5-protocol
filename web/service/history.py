@@ -40,10 +40,26 @@ class PrintHistory:
         self._lock = threading.Lock()
         self._init_db()
 
+    def _recreate_db_after_corruption(self, exc):
+        db_path = os.fspath(self._db_path)
+        if db_path == ":memory:":
+            raise
+        log.warning(f"History: database corruption detected at {db_path}: {exc}. Recreating database.")
+        try:
+            os.unlink(db_path)
+        except FileNotFoundError:
+            pass
+
     def _init_db(self):
-        with self._connect() as conn:
-            conn.executescript(_SCHEMA)
-            self._migrate_schema(conn)
+        try:
+            with self._connect() as conn:
+                conn.executescript(_SCHEMA)
+                self._migrate_schema(conn)
+        except sqlite3.DatabaseError as exc:
+            self._recreate_db_after_corruption(exc)
+            with self._connect() as conn:
+                conn.executescript(_SCHEMA)
+                self._migrate_schema(conn)
 
     def _migrate_schema(self, conn):
         """Ensure schema is up to date."""
@@ -198,6 +214,9 @@ class PrintHistory:
             "SELECT * FROM print_history WHERE status='started' ORDER BY id DESC LIMIT 1"
         ).fetchone()
 
+    def init_schema(self):
+        """Backward-compatible alias used by older tests and callers."""
+        self._init_db()
 
     def get_history(self, limit=50, offset=0):
         """Return recent print history as list of dicts."""
@@ -208,6 +227,10 @@ class PrintHistory:
                     (limit, offset)
                 ).fetchall()
                 return [dict(r) for r in rows]
+
+    def list_entries(self, limit=50, offset=0):
+        """Backward-compatible alias for get_history()."""
+        return self.get_history(limit=limit, offset=offset)
 
     def get_count(self):
         """Return total number of entries."""

@@ -209,7 +209,7 @@ class AnkerHTTPHubApiV2(AnkerHTTPApi):
 
 def _find_closest_host(hosts):
     host_names = list(hosts.values())
-    connect_times = [_measure_host_connect_time(h) for h in host_names]
+    connect_times = [_measure_host_connect_time(h, 443) for h in host_names]
     host_index = connect_times.index(min(connect_times))
     host_name = host_names[host_index]
 
@@ -219,8 +219,13 @@ def _find_closest_host(hosts):
 
 
 def _measure_host_connect_time(host, port=443):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
         time_before = time.time()
         s.connect((host, port))
         result = time.time() - time_before
+    except (OSError, TimeoutError):
+        return float("inf")
+    finally:
+        s.close()
     return result

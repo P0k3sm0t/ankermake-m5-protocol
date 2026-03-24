@@ -524,11 +524,11 @@ class MqttQueue(Service):
         # --- commandType 1000: printer state machine transitions ---
         if command_type == 1000:
             value = payload.get("value")
-            # Update _last_state_value first so that is_preparing_print reflects
-            # the new state when we snapshot it below.
-            self._last_state_value = value
+            # Snapshot the previous state before mutating it so transitions like
+            # prepare(8) -> idle(0) can still be classified correctly.
             was_preparing_print = self.is_preparing_print
             was_pending_start = self._pending_print_start
+            self._last_state_value = value
             if value == 1 and not self._print_active:
                 self._pending_print_start = False
                 # Print is now running

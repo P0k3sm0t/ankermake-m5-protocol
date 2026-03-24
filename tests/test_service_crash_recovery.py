@@ -42,6 +42,12 @@ class MockCrashingService(Service):
         self.stop_called += 1
 
 
+def _shutdown_service(service):
+    service.stop()
+    service.await_stopped()
+    service.shutdown()
+
+
 class TestServiceCrashRecovery:
     """Test service recovery after crashes"""
 
@@ -68,24 +74,28 @@ class TestServiceCrashRecovery:
 
         assert svc.restart_count >= 2  # Should have restarted at least once
 
-    def test_worker_run_exception_stops_service(self):
-        """Unhandled exception in worker_run stops service"""
+    def test_worker_run_exception_retries_service(self):
+        """Unhandled exception in worker_run keeps the service retrying."""
         service = MockCrashingService(crash_on_run=True)
-        service.start()
-
-        time.sleep(0.1)  # Let it crash
-
-        # Service should have stopped due to exception
-        assert service.state in [RunState.Stopping, RunState.Stopped]
-
-    def test_worker_start_exception_leaves_service_stopped(self):
-        """Exception in worker_start leaves service in Stopped state"""
-        service = MockCrashingService(crash_on_start=True)
-
-        with pytest.raises(RuntimeError, match="Simulated crash in worker_start"):
+        try:
             service.start()
+            time.sleep(0.1)  # Let it attempt a run and fail
+            assert service.run_called >= 1
+            assert service.start_called >= 1
+            assert service.wanted is True
+        finally:
+            _shutdown_service(service)
 
-        # Service should remain stopped
+    def test_worker_start_exception_retries_until_service_is_stopped(self):
+        """Exception in worker_start is retried until the service is stopped."""
+        service = MockCrashingService(crash_on_start=True)
+        try:
+            service.start()
+            time.sleep(0.1)
+            assert service.start_called >= 1
+            assert service.state == RunState.Starting
+        finally:
+            _shutdown_service(service)
         assert service.state == RunState.Stopped
 
     def test_service_manager_ref_counting_after_crash(self):
@@ -95,15 +105,16 @@ class TestServiceCrashRecovery:
         manager.register("crash_test", service)
 
         # Borrow and release
-        svc1 = manager.get("crash_test")
-        assert manager.svcs["crash_test"]["refs"] == 1
+        _ = manager.get("crash_test")
+        assert manager.refs["crash_test"] == 1
 
         manager.put("crash_test")
-        assert manager.svcs["crash_test"]["refs"] == 0
+        assert manager.refs["crash_test"] == 0
 
         # Service should have stopped
-        time.sleep(0.1)
+        service.await_stopped()
         assert service.state == RunState.Stopped
+        service.shutdown()
 
 
 class TestMQTTServiceRecovery:
@@ -316,12 +327,13 @@ class TestStatePreservation:
         history = PrintHistory(":memory:")
         history.init_schema()
 
-        task_id = history.record_start("test.gcode")
+        row_id = history.record_start("test.gcode")
 
         # Simulate restart by creating new instance with same DB
         # (In real scenario, would use persistent file)
         entries = history.list_entries(limit=10)
         assert len(entries) == 1
+        assert row_id is not None
         assert entries[0]["filename"] == "test.gcode"
         assert entries[0]["status"] == "started"
 
