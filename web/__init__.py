@@ -31,6 +31,7 @@ import json
 import logging
 import math
 import os
+import secrets
 import shutil
 import threading
 import time
@@ -951,10 +952,12 @@ def video_download():
     # the request comes from localhost.
     api_key = app.config.get("api_key")
     if api_key:
+        _hdr = request.headers.get("X-Api-Key", "")
+        _qry = request.args.get("apikey", "")
         authed = (
             session.get("authenticated")
-            or request.headers.get("X-Api-Key") == api_key
-            or request.args.get("apikey") == api_key
+            or (_hdr and secrets.compare_digest(_hdr, api_key))
+            or (_qry and secrets.compare_digest(_qry, api_key))
         )
         if not authed:
             log.warning("/video rejected: missing or invalid API key")
@@ -1297,7 +1300,10 @@ def app_api_files_local():
     """
     user_name = request.headers.get("User-Agent", "ankerctl").split(url_for('app_root'))[0]
 
-    no_act = not cli.util.parse_http_bool(request.form["print"])
+    try:
+        no_act = not cli.util.parse_http_bool(request.form.get("print", "false"))
+    except ValueError:
+        return {"error": "Invalid value for 'print' field"}, 400
 
     fd = request.files["file"]
     # Snapshot the active printer index at request time so the upload targets the
@@ -2182,6 +2188,11 @@ def app_api_filaments_apply(profile_id):
         return {"error": "Profile not found"}, 404
     nozzle = profile.get("nozzle_temp_first_layer") or profile.get("nozzle_temp_other_layer") or profile.get("nozzle_temp", 0)
     bed    = profile.get("bed_temp_first_layer") or profile.get("bed_temp_other_layer") or profile.get("bed_temp", 0)
+    try:
+        nozzle = max(0, min(int(nozzle), 350))
+        bed    = max(0, min(int(bed), 130))
+    except (TypeError, ValueError):
+        return {"error": "Invalid temperature values in filament profile"}, 422
     gcode = f"M104 S{nozzle}\nM140 S{bed}"
     with borrow_mqtt() as mqtt:
         mqtt.send_gcode(gcode)
@@ -2602,7 +2613,7 @@ def webserver(config, printer_index, host, port, insecure=False, **kwargs):
     api_key = cli.config.resolve_api_key(config)
     app.config["api_key"] = api_key
     if api_key:
-        log.info(f"API key authentication enabled (key: {api_key[:4]}...{api_key[-4:]})")
+        log.info("API key authentication enabled")
     else:
         log.info("No API key set. Authentication disabled.")
 
@@ -2701,10 +2712,12 @@ if os.getenv("ANKERCTL_DEV_MODE", "false").lower() == "true":
             return {"error": "Invalid filename"}, 400
 
         filepath = os.path.join(_log_dir, filename)
+        if not os.path.realpath(filepath).startswith(os.path.realpath(_log_dir) + os.sep):
+            return {"error": "Invalid filename"}, 400
         if not os.path.exists(filepath):
             return {"error": "File not found"}, 404
 
-        lines_count = request.args.get("lines", 500, type=int)
+        lines_count = max(1, min(request.args.get("lines", 500, type=int), 10000))
 
         try:
             with open(filepath, "r", encoding="utf-8", errors="replace") as f:
@@ -2781,6 +2794,14 @@ def add_security_headers(response):
     response.headers['X-Frame-Options'] = 'SAMEORIGIN'
     response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
     response.headers['Server'] = 'ankerctl'
+    response.headers['Content-Security-Policy'] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "connect-src 'self' ws: wss:; "
+        "media-src 'self';"
+    )
     return response
 
 
@@ -2877,7 +2898,7 @@ def _check_api_key():
     # Check ?apikey= URL parameter early (before GET shortcut) so it always
     # sets the session cookie — even on unprotected GET requests.
     url_key = request.args.get("apikey")
-    if url_key == api_key:
+    if url_key and secrets.compare_digest(url_key, api_key):
         session["authenticated"] = True
         # Strip ?apikey= from URL so it doesn't stay in browser history
         from urllib.parse import urlencode, parse_qs, urlparse
@@ -2890,7 +2911,8 @@ def _check_api_key():
         return redirect(clean_url)
 
     # Check X-Api-Key header (slicer / programmatic access)
-    if request.headers.get("X-Api-Key") == api_key:
+    header_key = request.headers.get("X-Api-Key")
+    if header_key and secrets.compare_digest(header_key, api_key):
         return None
 
     # Allow read-only (GET/HEAD/OPTIONS) unless the path is explicitly protected.
