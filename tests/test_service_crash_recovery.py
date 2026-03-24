@@ -345,13 +345,13 @@ class TestErrorLogging:
     def test_service_crash_logged(self, mock_log_error):
         """Service crash exception is logged"""
         service = MockCrashingService(crash_on_run=True)
-        service.start()
+        try:
+            service.start()
+            time.sleep(0.1)
+        finally:
+            _shutdown_service(service)
 
-        time.sleep(0.1)
-
-        # Should have logged the crash
-        # (Implementation-specific: check actual logging)
-        pass
+        assert mock_log_error.called
 
     def test_database_error_logged_with_context(self):
         """Database errors logged with helpful context"""
