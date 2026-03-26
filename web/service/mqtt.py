@@ -80,6 +80,7 @@ class MqttQueue(Service):
     def _reset_print_state(self):
         self._print_active = False
         self._pending_print_start = False
+        self._in_pre_print_window = False
         self._last_state_value = 0
         self._print_started_at = None
         self._last_progress = None
@@ -519,6 +520,16 @@ class MqttQueue(Service):
             if self._print_active and self._pending_history_start and self._last_filename:
                 self._history.record_start(self._last_filename, task_id=self._last_task_id)
                 self._pending_history_start = False
+            # Activate print early so Stop sends value=4 (not the prepare-cancel path)
+            # during the G28/calibration window before ct=1000 value=1 arrives.
+            # Only activate if a print was actually requested (_pending_print_start=True),
+            # so upload-only flows are not affected.
+            if not self._print_active and self._pending_print_start:
+                self._print_active = True
+                self._in_pre_print_window = True
+                self._pending_print_start = False
+                self._stop_requested = False
+                log.info("Early print activation via ct 1044")
             return
 
         # --- commandType 1000: printer state machine transitions ---
@@ -529,8 +540,9 @@ class MqttQueue(Service):
             was_preparing_print = self.is_preparing_print
             was_pending_start = self._pending_print_start
             self._last_state_value = value
-            if value == 1 and not self._print_active:
+            if value == 1 and (not self._print_active or self._in_pre_print_window):
                 self._pending_print_start = False
+                self._in_pre_print_window = False
                 # Print is now running
                 self._print_active = True
                 self._print_started_at = time.monotonic()
@@ -588,24 +600,31 @@ class MqttQueue(Service):
                     log.info("Pending print start ended without an active print; resetting state")
                 self._reset_print_state()
             elif value == 8 and self._print_active:
-                log.info(
-                    "History: print aborted (ct 1000 value=8), filename=%r",
-                    self._last_filename,
-                )
-                self._history.record_fail(
-                    filename=self._last_filename,
-                    reason="aborted",
-                    task_id=self._last_task_id,
-                )
-                self._timelapse.fail_capture()
-                self._ha.update_state(print_status="failed")
-                self._send_event(
-                    EVENT_PRINT_FAILED,
-                    self._build_payload(payload, self._last_progress or 0, failure_reason="aborted"),
-                )
-                self._failure_sent = True
-                self._print_active = False
-                self._reset_print_state()
+                if self._in_pre_print_window:
+                    # value=8 during G28/calibration is normal pre-print state, not a real abort
+                    log.info(
+                        "History: ignoring pre-print state 8 (not a real abort yet), filename=%r",
+                        self._last_filename,
+                    )
+                else:
+                    log.info(
+                        "History: print aborted (ct 1000 value=8), filename=%r",
+                        self._last_filename,
+                    )
+                    self._history.record_fail(
+                        filename=self._last_filename,
+                        reason="aborted",
+                        task_id=self._last_task_id,
+                    )
+                    self._timelapse.fail_capture()
+                    self._ha.update_state(print_status="failed")
+                    self._send_event(
+                        EVENT_PRINT_FAILED,
+                        self._build_payload(payload, self._last_progress or 0, failure_reason="aborted"),
+                    )
+                    self._failure_sent = True
+                    self._print_active = False
+                    self._reset_print_state()
             elif value == 8:
                 self._pending_print_start = False
             return
@@ -789,6 +808,7 @@ class MqttQueue(Service):
         return {
             "print": {
                 "active": self._print_active,
+                "in_pre_print_window": self._in_pre_print_window,
                 "pending_start": self.has_pending_print_start,
                 "state": self._last_state_value,
                 "preparing": self.is_preparing_print,

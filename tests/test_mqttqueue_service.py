@@ -256,6 +256,44 @@ def test_pending_start_stop_cancels_before_print_becomes_active():
     assert queue._stop_requested is False
 
 
+def test_early_stop_during_pre_print_window_sends_value4_and_cancels():
+    """Stop during G28/calibration (ct=1044 received, ct=1000 value=1 not yet) must send
+    value=4 (not value=0) and correctly record cancellation when the printer confirms with
+    ct=1000 value=0."""
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+    sent = []
+    queue.client = SimpleNamespace(command=lambda payload: sent.append(payload))
+
+    queue.mark_pending_print_start("cube.gcode")
+    queue._handle_notification({"commandType": 1044, "filePath": "/tmp/cube.gcode"})
+
+    # Printer is now in pre-print window: active=True, in_pre_print_window=True
+    state = queue.get_state()["print"]
+    assert state["active"] is True
+    assert state["in_pre_print_window"] is True
+
+    # G28 calibration phase arrives
+    queue._handle_notification({"commandType": 1000, "value": 8})
+    assert queue.get_state()["print"]["active"] is True  # still active, not aborted
+
+    # User clicks Stop
+    queue.send_print_control(4)
+
+    # Must send flat value=4, not value=0
+    assert sent[-1] == {"commandType": 1008, "value": 4}
+
+    # Printer confirms cancel
+    queue._handle_notification({"commandType": 1000, "value": 0})
+
+    assert history_calls == [("fail", (), {"filename": "cube.gcode", "reason": "cancelled", "task_id": None})]
+    assert timelapse_calls == [("fail",)]
+    assert queue._stop_requested is False
+    assert queue.get_state()["print"]["active"] is False
+    assert queue.get_state()["print"]["in_pre_print_window"] is False
+
+
 def test_build_payload_get_state_and_simulate_event(monkeypatch):
     global ha_updates, history_calls, timelapse_calls, events
     ha_updates, history_calls, timelapse_calls, events = [], [], [], []
