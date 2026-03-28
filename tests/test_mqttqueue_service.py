@@ -411,7 +411,7 @@ def test_ct1001_blocked_during_pre_print_window():
 def test_print_state_enum_values():
     """PrintState enum has all expected members."""
     assert set(PrintState.__members__.keys()) == {
-        "IDLE", "PREPARING", "PRE_PRINT", "PRINTING", "FAILED",
+        "IDLE", "PREPARING", "PRE_PRINT", "PRINTING", "PAUSED", "FAILED",
     }
 
 
@@ -540,3 +540,242 @@ def test_new_print_starts_after_ct1001_failure():
     assert queue._state == PrintState.PRINTING, f"Expected PRINTING, got {queue._state}"
     start_events = [e for e in events if e[0] == "print_started"]
     assert len(start_events) == 1, "New print after failure should fire start event"
+
+
+def test_pause_and_resume():
+    """ct=1000 value=2 pauses a printing job, value=3 resumes it."""
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+
+    # Start a print
+    queue._handle_notification({"commandType": 1044, "filePath": "/tmp/cube.gcode"})
+    queue._handle_notification({"commandType": 1000, "value": 1})
+    assert queue._state == PrintState.PRINTING
+
+    # Pause
+    ha_updates.clear()
+    queue._handle_notification({"commandType": 1000, "value": 2})
+    assert queue._state == PrintState.PAUSED
+    assert queue.is_printing is True, "Paused print should still count as active"
+    assert any(u.get("print_status") == "paused" for u in ha_updates), "HA should report paused"
+
+    # Resume
+    ha_updates.clear()
+    queue._handle_notification({"commandType": 1000, "value": 3})
+    assert queue._state == PrintState.PRINTING
+    assert any(u.get("print_status") == "printing" for u in ha_updates), "HA should report printing after resume"
+
+
+def test_pause_only_from_printing():
+    """value=2 is ignored if not currently PRINTING."""
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+
+    # value=2 from IDLE should be a no-op
+    queue._handle_notification({"commandType": 1000, "value": 2})
+    assert queue._state == PrintState.IDLE
+
+
+def test_resume_only_from_paused():
+    """value=3 is ignored if not currently PAUSED."""
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+
+    # Start printing, then try resume without pausing first
+    queue._handle_notification({"commandType": 1044, "filePath": "/tmp/cube.gcode"})
+    queue._handle_notification({"commandType": 1000, "value": 1})
+    assert queue._state == PrintState.PRINTING
+
+    queue._handle_notification({"commandType": 1000, "value": 3})
+    assert queue._state == PrintState.PRINTING, "Resume without pause should be no-op"
+
+
+def test_stop_during_pause():
+    """Stopping a paused print should cancel it properly."""
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+
+    # Start, pause, then stop
+    queue._handle_notification({"commandType": 1044, "filePath": "/tmp/cube.gcode"})
+    queue._handle_notification({"commandType": 1000, "value": 1})
+    queue._handle_notification({"commandType": 1000, "value": 2})
+    assert queue._state == PrintState.PAUSED
+
+    queue._stop_requested = True
+    queue._handle_notification({"commandType": 1000, "value": 0})
+
+    assert queue._state == PrintState.IDLE
+    fail_records = [c for c in history_calls if c[0] == "fail"]
+    assert len(fail_records) == 1, "Stopped paused print should record failure"
+    assert fail_records[0][2]["reason"] == "cancelled"
+
+
+def test_normal_finish_from_paused():
+    """value=0 without stop_requested from PAUSED records a normal finish."""
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+
+    queue._handle_notification({"commandType": 1044, "filePath": "/tmp/cube.gcode"})
+    queue._handle_notification({"commandType": 1000, "value": 1})
+    queue._handle_notification({"commandType": 1000, "value": 2})
+    assert queue._state == PrintState.PAUSED
+
+    # Normal finish (no stop_requested)
+    history_calls.clear()
+    events.clear()
+    queue._handle_notification({"commandType": 1000, "value": 0})
+
+    assert queue._state == PrintState.IDLE
+    finish_records = [c for c in history_calls if c[0] == "finish"]
+    fail_records = [c for c in history_calls if c[0] == "fail"]
+    finish_events = [e for e in events if e[0] == "print_finished"]
+    assert len(finish_records) == 1, "Normal finish from paused should record finish"
+    assert len(fail_records) == 0, "Normal finish from paused should not record failure"
+    assert len(finish_events) == 1, "Normal finish from paused should send finish event"
+
+
+def test_abort_during_pause():
+    """value=8 from PAUSED is a real abort (not pre-print ignore)."""
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+
+    queue._handle_notification({"commandType": 1044, "filePath": "/tmp/cube.gcode"})
+    queue._handle_notification({"commandType": 1000, "value": 1})
+    queue._handle_notification({"commandType": 1000, "value": 2})
+    assert queue._state == PrintState.PAUSED
+
+    history_calls.clear()
+    events.clear()
+    timelapse_calls.clear()
+    queue._handle_notification({"commandType": 1000, "value": 8})
+
+    assert queue._state == PrintState.IDLE
+    fail_records = [c for c in history_calls if c[0] == "fail"]
+    fail_events = [e for e in events if e[0] == "print_failed"]
+    assert len(fail_records) == 1, "Abort during pause should record failure"
+    assert fail_records[0][2]["reason"] == "aborted"
+    assert len(fail_events) == 1, "Abort during pause should send fail event"
+    assert ("fail",) in timelapse_calls, "Abort during pause should fail timelapse"
+
+
+def test_ct1001_progress_ignored_during_pause():
+    """Progress messages during PAUSED should not emit progress events
+    or change state."""
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+
+    queue._handle_notification({"commandType": 1044, "filePath": "/tmp/cube.gcode"})
+    queue._handle_notification({"commandType": 1000, "value": 1})
+    queue._handle_notification({"commandType": 1000, "value": 2})
+    assert queue._state == PrintState.PAUSED
+
+    events.clear()
+    queue._handle_notification({
+        "commandType": 1001,
+        "progress": 5000,
+        "name": "cube.gcode",
+    })
+
+    assert queue._state == PrintState.PAUSED, "State should remain PAUSED"
+    progress_events = [e for e in events if e[0] == "print_progress"]
+    assert len(progress_events) == 0, "No progress events during pause"
+
+
+def test_ct1001_failure_during_pause_is_swallowed():
+    """ct=1001 with errorMessage during PAUSED is silently ignored.
+    The failure guard checks _state == PRINTING, so PAUSED errors
+    don't trigger duplicate failure handling. The printer should send
+    ct=1000 value=0 or value=8 for real failures."""
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+
+    queue._handle_notification({"commandType": 1044, "filePath": "/tmp/cube.gcode"})
+    queue._handle_notification({"commandType": 1000, "value": 1})
+    queue._handle_notification({"commandType": 1000, "value": 2})
+    assert queue._state == PrintState.PAUSED
+
+    events.clear()
+    history_calls.clear()
+    queue._handle_notification({
+        "commandType": 1001,
+        "progress": 5000,
+        "name": "cube.gcode",
+        "errorMessage": "jam",
+    })
+
+    assert queue._state == PrintState.PAUSED, "Should remain PAUSED"
+    fail_events = [e for e in events if e[0] == "print_failed"]
+    fail_records = [c for c in history_calls if c[0] == "fail"]
+    assert len(fail_events) == 0, "ct=1001 failure ignored during pause"
+    assert len(fail_records) == 0, "ct=1001 failure ignored during pause"
+
+
+def test_pause_and_resume_guards_reject_invalid_states():
+    """value=2 is only valid from PRINTING; value=3 only from PAUSED.
+    All other states should be no-ops."""
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+
+    # value=2 from each non-PRINTING state
+    for state in (PrintState.IDLE, PrintState.PREPARING, PrintState.PRE_PRINT,
+                  PrintState.PAUSED, PrintState.FAILED):
+        queue._state = state
+        queue._handle_notification({"commandType": 1000, "value": 2})
+        assert queue._state == state, f"value=2 from {state.name} should be no-op"
+
+    # value=3 from each non-PAUSED state
+    for state in (PrintState.IDLE, PrintState.PREPARING, PrintState.PRE_PRINT,
+                  PrintState.PRINTING, PrintState.FAILED):
+        queue._state = state
+        queue._handle_notification({"commandType": 1000, "value": 3})
+        assert queue._state == state, f"value=3 from {state.name} should be no-op"
+
+
+def test_transition_to_active_blocked_from_paused():
+    """_transition_to_active() should not fire from PAUSED state."""
+    queue = _queue()
+    queue._state = PrintState.PAUSED
+    assert queue._transition_to_active({}, progress=50) is False
+    assert queue._state == PrintState.PAUSED
+
+
+def test_forward_to_ha_reports_paused_during_ct1001():
+    """_forward_to_ha derives 'paused' status for ct=1001 messages
+    while in PAUSED state (separate code path from ct=1000 handler)."""
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+    queue._state = PrintState.PAUSED
+
+    queue._forward_to_ha({
+        "commandType": 1001,
+        "progress": 5000,
+        "name": "cube.gcode",
+    })
+
+    paused_updates = [u for u in ha_updates if u.get("print_status") == "paused"]
+    assert len(paused_updates) >= 1, "HA should report 'paused' for ct=1001 during pause"
+
+
+def test_get_state_during_pause():
+    """get_state() output is correct during PAUSED."""
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+    queue._state = PrintState.PAUSED
+    queue._last_state_value = 8  # worst case for is_preparing_print
+
+    state = queue.get_state()["print"]
+    assert state["print_state"] == "paused"
+    assert state["active"] is True
+    assert state["in_pre_print_window"] is False
+    assert state["preparing"] is False, "is_preparing_print should be False during PAUSED"

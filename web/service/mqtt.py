@@ -28,15 +28,20 @@ class PrintState(Enum):
     PREPARING                         │ (_transition_to_active) │
       │ ct=1044 + pending             v                        │
       v                          PRINTING ─────────────────────┘
-    PRE_PRINT ──────────────────────^    │       (_reset)
-      │ ct=1000 val=1 (upgrade)          v
-      └─────────────────────────>   FAILED ────────────────────┘
-                                          (_reset)
+    PRE_PRINT ──────────────────────^  │ │      (_reset)
+      │ ct=1000 val=1 (upgrade)        │ v
+      └─────────────────────────>      │ PAUSED ──ct=1000 val=3──>PRINTING
+                                       v   │
+                                    FAILED  │ ct=1000 val=0+stop
+                                       │   v
+                                       └─>FAILED──────────────────┘
+                                                   (_reset)
     """
     IDLE = "idle"
     PREPARING = "preparing"
     PRE_PRINT = "pre_print"
     PRINTING = "printing"
+    PAUSED = "paused"
     FAILED = "failed"
 
 
@@ -150,13 +155,13 @@ class MqttQueue(Service):
 
     @property
     def is_printing(self):
-        return self._state in (PrintState.PRE_PRINT, PrintState.PRINTING)
+        return self._state in (PrintState.PRE_PRINT, PrintState.PRINTING, PrintState.PAUSED)
 
     @property
     def is_preparing_print(self):
         # Hardware preparing state (firmware sent value=8) while not actively printing.
         # Distinct from PREPARING enum state (software pending start from FileTransferService).
-        return self._last_state_value == 8 and self._state not in (PrintState.PRE_PRINT, PrintState.PRINTING)
+        return self._last_state_value == 8 and self._state not in (PrintState.PRE_PRINT, PrintState.PRINTING, PrintState.PAUSED)
 
     @property
     def has_pending_print_start(self):
@@ -547,7 +552,9 @@ class MqttQueue(Service):
                 ha_updates["time_remaining"] = remaining
 
             # Derive print status
-            if self._state in (PrintState.PRE_PRINT, PrintState.PRINTING):
+            if self._state == PrintState.PAUSED:
+                ha_updates["print_status"] = "paused"
+            elif self._state in (PrintState.PRE_PRINT, PrintState.PRINTING):
                 ha_updates["print_status"] = "printing"
             elif progress is not None and progress >= 100:
                 ha_updates["print_status"] = "complete"
@@ -594,8 +601,16 @@ class MqttQueue(Service):
             self._last_state_value = value
             if value == 1:
                 self._transition_to_active(payload, progress=0)
-            elif value == 0 and (self._state in (PrintState.PRE_PRINT, PrintState.PRINTING) or was_preparing_print or was_pending_start):
-                if self._state in (PrintState.PRE_PRINT, PrintState.PRINTING):
+            elif value == 2 and self._state == PrintState.PRINTING:
+                self._state = PrintState.PAUSED
+                self._ha.update_state(print_status="paused")
+                log.info("Print paused (ct 1000 value=2)")
+            elif value == 3 and self._state == PrintState.PAUSED:
+                self._state = PrintState.PRINTING
+                self._ha.update_state(print_status="printing")
+                log.info("Print resumed (ct 1000 value=3)")
+            elif value == 0 and (self._state in (PrintState.PRE_PRINT, PrintState.PRINTING, PrintState.PAUSED) or was_preparing_print or was_pending_start):
+                if self._state in (PrintState.PRE_PRINT, PrintState.PRINTING, PrintState.PAUSED):
                     if self._stop_requested:
                         # Print was cancelled via stop command
                         log.info(f"History: print cancelled (ct 1000 value=0 after stop), filename={self._last_filename!r}")
@@ -634,7 +649,7 @@ class MqttQueue(Service):
                 else:
                     log.info("Pending print start ended without an active print; resetting state")
                 self._reset_print_state()
-            elif value == 8 and self._state in (PrintState.PRE_PRINT, PrintState.PRINTING):
+            elif value == 8 and self._state in (PrintState.PRE_PRINT, PrintState.PRINTING, PrintState.PAUSED):
                 if self._state == PrintState.PRE_PRINT:
                     # value=8 during G28/calibration is normal pre-print state, not a real abort
                     log.info(
@@ -722,7 +737,7 @@ class MqttQueue(Service):
             self._state = PrintState.FAILED
             return
 
-        if 0 < progress < 100 and self._state not in (PrintState.PRE_PRINT, PrintState.PRINTING):
+        if 0 < progress < 100 and self._state not in (PrintState.PRE_PRINT, PrintState.PRINTING, PrintState.PAUSED):
             self._transition_to_active(payload, progress, filename=filename)
 
         status_text = self._extract_status_text(payload)
@@ -827,7 +842,7 @@ class MqttQueue(Service):
         return {
             "print": {
                 "print_state": self._state.value,
-                "active": self._state in (PrintState.PRE_PRINT, PrintState.PRINTING),
+                "active": self._state in (PrintState.PRE_PRINT, PrintState.PRINTING, PrintState.PAUSED),
                 "in_pre_print_window": self._state == PrintState.PRE_PRINT,
                 "pending_start": self._state == PrintState.PREPARING,
                 "state": self._last_state_value,
@@ -961,7 +976,7 @@ class MqttQueue(Service):
             self.has_pending_print_start,
         )
 
-        if value in (0, 4) and (self._state in (PrintState.PRE_PRINT, PrintState.PRINTING) or pre_start_window):
+        if value in (0, 4) and (self._state in (PrintState.PRE_PRINT, PrintState.PRINTING, PrintState.PAUSED) or pre_start_window):
             self._stop_requested = True
 
         if value in (0, 4) and pre_start_window:
