@@ -236,6 +236,14 @@ def _stop_switchable_services():
     pppp = app.svc.svcs.get("pppp")
     if pppp:
         pppp.stop()
+        try:
+            pppp.await_stopped()
+        except Exception as exc:
+            log.debug(f"PPPPService stop wait failed: {exc}")
+        try:
+            app.svc.unregister("pppp")
+        except Exception as exc:
+            log.debug(f"PPPPService unregister failed: {exc}")
 
 
 def _deep_update(base, updates):
@@ -1198,14 +1206,14 @@ def app_api_set_active_printer():
         and hasattr(app.svc, "unregister")
     )
     if rich_service_manager:
-        register_services(app)
-
-        # MQTT observers stay bound per printer. Only reset the services that
-        # follow the currently selected printer for camera / PPPP access.
+        # Stop and fully tear down the old PPPP/video services first so that
+        # register_services() can create fresh instances for the new printer.
         try:
             _stop_switchable_services()
         except Exception as err:
             log.warning(f"Service reset after printer switch raised: {err}")
+
+        register_services(app)
     else:
         restart_all = getattr(app.svc, "restart_all", None)
         if restart_all is not None:
