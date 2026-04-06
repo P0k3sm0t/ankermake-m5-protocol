@@ -76,6 +76,7 @@ def test_service_manager_get_rolls_back_on_ready_failure_and_video_put_keeps_run
     manager = ServiceManager()
     broken = FakeManagedService(ready_error=ServiceError("boom"))
     video = FakeManagedService(state=RunState.Running, video_enabled=True)
+    video.persistent = True  # video_enabled=True keeps service alive (via persistent flag)
     manager.register("broken", broken)
     manager.register("videoqueue", video)
 

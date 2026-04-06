@@ -144,7 +144,7 @@ def test_printer_control_and_autolevel_routes_validate_and_dispatch():
         )
         control = client.post(
             "/api/printer/control",
-            json={"value": 8},
+            json={"value": 2},
             headers={"X-Api-Key": API_KEY},
         )
         allowed = client.post(
@@ -163,7 +163,7 @@ def test_printer_control_and_autolevel_routes_validate_and_dispatch():
     assert control.status_code == 200
     assert allowed.status_code == 200
     assert blocked.status_code == 409
-    assert control_calls == [8]
+    assert control_calls == [2]
     assert autolevel_calls == [True]
 
 
@@ -191,7 +191,7 @@ def test_printer_z_offset_routes_refresh_set_and_nudge():
     old_values, old_svc = _install_app_state(mqtt=mqtt)
 
     try:
-        get_resp = client.get("/api/printer/z-offset")
+        get_resp = client.get("/api/printer/z-offset", headers={"X-Api-Key": API_KEY})
         refresh_resp = client.post(
             "/api/printer/z-offset/refresh",
             headers={"X-Api-Key": API_KEY},
@@ -262,9 +262,9 @@ def test_timelapse_routes_list_download_delete_and_reject_traversal(tmp_path):
     old_values, old_svc = _install_app_state(mqtt=mqtt)
 
     try:
-        listed = client.get("/api/timelapses")
-        invalid = client.get("/api/timelapse/..\\\\passwd.mp4")
-        downloaded = client.get("/api/timelapse/cube.mp4")
+        listed = client.get("/api/timelapses", headers={"X-Api-Key": API_KEY})
+        invalid = client.get("/api/timelapse/..\\\\passwd.mp4", headers={"X-Api-Key": API_KEY})
+        downloaded = client.get("/api/timelapse/cube.mp4", headers={"X-Api-Key": API_KEY})
         deleted = client.delete("/api/timelapse/cube.mp4", headers={"X-Api-Key": API_KEY})
     finally:
         _restore_app_state(old_values, old_svc)
@@ -282,21 +282,21 @@ def test_snapshot_route_reports_expected_error_paths(monkeypatch):
     old_values, old_svc = _install_app_state(video_supported=False, videoqueue=None)
 
     try:
-        not_supported = client.get("/api/snapshot")
+        not_supported = client.get("/api/snapshot", headers={"X-Api-Key": API_KEY})
     finally:
         _restore_app_state(old_values, old_svc)
 
     monkeypatch.setattr("shutil.which", lambda name: None)
     old_values, old_svc = _install_app_state(video_supported=True, videoqueue=object())
     try:
-        no_ffmpeg = client.get("/api/snapshot")
+        no_ffmpeg = client.get("/api/snapshot", headers={"X-Api-Key": API_KEY})
     finally:
         _restore_app_state(old_values, old_svc)
 
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
     old_values, old_svc = _install_app_state(video_supported=True, videoqueue=None)
     try:
-        no_service = client.get("/api/snapshot")
+        no_service = client.get("/api/snapshot", headers={"X-Api-Key": API_KEY})
     finally:
         _restore_app_state(old_values, old_svc)
 
