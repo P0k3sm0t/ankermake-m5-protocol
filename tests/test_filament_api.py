@@ -115,7 +115,7 @@ def test_filament_crud_and_apply_routes(tmp_path):
             headers={"X-Api-Key": API_KEY},
         )
         profile_id = created.get_json()["id"]
-        listed = client.get("/api/filaments")
+        listed = client.get("/api/filaments", headers={"X-Api-Key": API_KEY})
         updated = client.put(
             f"/api/filaments/{profile_id}",
             json={"name": "PLA Test 2", "bed_temp": 65},

@@ -57,6 +57,7 @@ class MqttQueue(Service):
         self.printer_index = printer_index
         super().__init__()
         self.persistent = True
+        self._state_lock = threading.RLock()
 
     def worker_init(self):
         self._notifier = AppriseNotifier(app.config["config"])
@@ -78,7 +79,6 @@ class MqttQueue(Service):
         self._ha = HomeAssistantService(app.config["config"], printer_sn=printer_sn, printer_name=printer_name)
         self._ha.start()
 
-        self._state_lock = threading.RLock()
         self._reset_print_state()
         self._gcode_layer_count = None  # Override from GCode header, survives print resets
         self._last_message_time = 0.0

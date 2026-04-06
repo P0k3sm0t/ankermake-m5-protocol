@@ -55,7 +55,7 @@ def test_mqtt_send_blocks_dangerous_commands_without_force(monkeypatch):
         ["mqtt", "send", "ZZ_MQTT_CMD_RECOVER_FACTORY"],
     )
 
-    assert result.exit_code == 0
+    assert result.exit_code == 1
     assert opened == []
 
 
@@ -103,7 +103,7 @@ def test_config_password_commands_validate_generate_and_remove(monkeypatch):
     generated = runner.invoke(ankerctl.main, ["config", "set-password"])
     removed = runner.invoke(ankerctl.main, ["config", "remove-password"])
 
-    assert invalid.exit_code == 0
+    assert invalid.exit_code == 1
     assert generated.exit_code == 0
     assert removed.exit_code == 0
     assert fake_config.api_keys == ["RANDOMKEY1234567890"]
