@@ -2038,24 +2038,30 @@ $(function () {
     /**
      * Snapshot Button
      */
-    $("#snapshot-btn").on("click", function () {
+    $("#snapshot-btn").on("click", async function () {
         const btn = $(this);
         btn.prop("disabled", true);
-        fetch("/api/snapshot")
-            .then(resp => {
-                if (!resp.ok) throw new Error("Snapshot failed");
-                return resp.blob();
-            })
-            .then(blob => {
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement("a");
-                a.href = url;
-                a.download = `ankerctl_snapshot_${Date.now()}.jpg`;
-                a.click();
-                URL.revokeObjectURL(url);
-            })
-            .catch(err => alert("Snapshot failed: " + err.message))
-            .finally(() => btn.prop("disabled", false));
+        try {
+            const resp = await fetch("/api/snapshot");
+            if (!resp.ok) {
+                const data = await resp.json().catch(() => ({}));
+                const msg = data.error || `HTTP ${resp.status}`;
+                flash_message(`Snapshot failed: ${msg}`, "warning");
+                return;
+            }
+
+            const blob = await resp.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `ankerctl_snapshot_${Date.now()}.jpg`;
+            a.click();
+            URL.revokeObjectURL(url);
+        } catch (err) {
+            flash_message(`Snapshot failed: ${err.message || err}`, "warning");
+        } finally {
+            btn.prop("disabled", false);
+        }
     });
 
     /**

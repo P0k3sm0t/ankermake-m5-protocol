@@ -307,23 +307,34 @@ def test_snapshot_route_reports_expected_error_paths(monkeypatch):
     finally:
         _restore_app_state(old_values, old_svc)
 
-    monkeypatch.setattr("shutil.which", lambda name: None)
+    monkeypatch.setattr("web._ffmpeg_path", lambda: None)
     old_values, old_svc = _install_app_state(video_supported=True, videoqueue=object())
     try:
         no_ffmpeg = client.get("/api/snapshot", headers={"X-Api-Key": API_KEY})
     finally:
         _restore_app_state(old_values, old_svc)
 
-    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ffmpeg")
+    monkeypatch.setattr("web._ffmpeg_path", lambda: "/usr/bin/ffmpeg")
     old_values, old_svc = _install_app_state(video_supported=True, videoqueue=None)
     try:
         no_service = client.get("/api/snapshot", headers={"X-Api-Key": API_KEY})
     finally:
         _restore_app_state(old_values, old_svc)
 
+    old_values, old_svc = _install_app_state(
+        video_supported=True,
+        videoqueue=SimpleNamespace(video_enabled=False),
+    )
+    try:
+        video_disabled = client.get("/api/snapshot", headers={"X-Api-Key": API_KEY})
+    finally:
+        _restore_app_state(old_values, old_svc)
+
     assert not_supported.status_code == 400
     assert no_ffmpeg.status_code == 500
     assert no_service.status_code == 503
+    assert video_disabled.status_code == 409
+    assert "Enable video" in video_disabled.get_json()["error"]
 
 
 def test_unsupported_device_guard_blocks_printer_control_routes():

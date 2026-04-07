@@ -119,8 +119,30 @@ def _env_int(name, default, min_value=1, env=None):
     return value
 
 
+def _ffmpeg_path():
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+
+    cached = getattr(_ffmpeg_path, "_cached", None)
+    if cached and os.path.isfile(cached):
+        return cached
+
+    local_app_data = os.getenv("LOCALAPPDATA")
+    if local_app_data:
+        packages_dir = os.path.join(local_app_data, "Microsoft", "WinGet", "Packages")
+        if os.path.isdir(packages_dir):
+            for root, _, files in os.walk(packages_dir):
+                if "ffmpeg.exe" in files:
+                    candidate = os.path.join(root, "ffmpeg.exe")
+                    _ffmpeg_path._cached = candidate
+                    return candidate
+
+    return None
+
+
 def _ffmpeg_available():
-    return shutil.which("ffmpeg") is not None
+    return _ffmpeg_path() is not None
 
 
 def _configure_request_limits(flask_app, env=None):
@@ -2149,19 +2171,21 @@ def app_api_printer_bed_leveling_last():
 @app.get("/api/snapshot")
 def app_api_snapshot():
     """Capture a JPEG snapshot from the camera and return it as a file download."""
-    import shutil
     import subprocess
     import tempfile
 
     if not app.config.get("video_supported"):
         return {"error": "Video not supported on this platform"}, 400
 
-    if not shutil.which("ffmpeg"):
+    ffmpeg_path = _ffmpeg_path()
+    if not ffmpeg_path:
         return {"error": "ffmpeg not installed"}, 500
 
     vq = app.svc.svcs.get("videoqueue")
     if not vq:
         return {"error": "Video service not available"}, 503
+    if not getattr(vq, "video_enabled", False):
+        return {"error": "Enable video before taking a snapshot"}, 409
 
     host = os.getenv("FLASK_HOST") or "127.0.0.1"
     if host in {"0.0.0.0", "::"}:
@@ -2181,14 +2205,14 @@ def app_api_snapshot():
 
     try:
         result = subprocess.run(
-            ["ffmpeg", "-loglevel", "error", "-nostdin", "-y",
+            [ffmpeg_path, "-loglevel", "error", "-nostdin", "-y",
              "-f", "h264", "-i", url, "-frames:v", "1", temp_path],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
         )
         if result.returncode != 0:
             # Retry without -f h264
             result = subprocess.run(
-                ["ffmpeg", "-loglevel", "error", "-nostdin", "-y",
+                [ffmpeg_path, "-loglevel", "error", "-nostdin", "-y",
                  "-i", url, "-frames:v", "1", temp_path],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
             )
