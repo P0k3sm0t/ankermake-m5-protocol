@@ -45,6 +45,22 @@ class PrintState(Enum):
     FAILED = "failed"
 
 
+MQTT_PRINT_STATE_LABELS = {
+    0: "idle",
+    1: "printing",
+    2: "paused",
+    3: "resume_ack",
+    8: "preparing_or_aborted",
+}
+
+G28_DEDUPE_WINDOW_SEC = 10.0
+HOME_GCODE_BY_AXIS = {
+    "all": "G28",
+    "xy": "G28 X0 Y0",
+    "z": "G28 Z0",
+}
+
+
 import cli.mqtt
 from ..notifications import AppriseNotifier, format_duration
 from .history import PrintHistory
@@ -94,6 +110,8 @@ class MqttQueue(Service):
         self._z_offset_updated_at = 0.0
         self._z_offset_seq = 0
         self._z_offset_cond = threading.Condition()
+        self._last_g28_command = None
+        self._last_g28_command_at = 0.0
 
     def set_gcode_layer_count(self, count: int):
         """Store the layer count extracted from a GCode header for UI display."""
@@ -137,6 +155,18 @@ class MqttQueue(Service):
         )
         self._failure_sent = True
         self._state = PrintState.FAILED
+
+    @staticmethod
+    def _print_state_value_label(value):
+        return MQTT_PRINT_STATE_LABELS.get(value, f"unknown_{value}")
+
+    def _transition_from_paused_to_printing(self):
+        if self._state != PrintState.PAUSED:
+            return False
+
+        self._state = PrintState.PRINTING
+        self._ha.update_state(print_status="printing")
+        return True
 
     def _transition_to_active(self, payload, progress, filename=None):
         """Activate print state.  Handles both fresh activation and upgrade
@@ -620,17 +650,21 @@ class MqttQueue(Service):
             # prepare(8) -> idle(0) can still be classified correctly.
             was_preparing_print = self.is_preparing_print
             was_pending_start = self._state == PrintState.PREPARING
+            stop_was_requested = self._stop_requested
+            previous_state = self._state
             self._last_state_value = value
-            if value == 1:
+            if value == 1 and self._state == PrintState.PAUSED:
+                if self._transition_from_paused_to_printing():
+                    log.info("Print resumed (ct 1000 value=1)")
+            elif value == 1:
                 self._transition_to_active(payload, progress=0)
             elif value == 2 and self._state == PrintState.PRINTING:
                 self._state = PrintState.PAUSED
                 self._ha.update_state(print_status="paused")
                 log.info("Print paused (ct 1000 value=2)")
             elif value == 3 and self._state == PrintState.PAUSED:
-                self._state = PrintState.PRINTING
-                self._ha.update_state(print_status="printing")
-                log.info("Print resumed (ct 1000 value=3)")
+                if self._transition_from_paused_to_printing():
+                    log.info("Print resumed (ct 1000 value=3)")
             elif value == 0 and (self._state in (PrintState.PRE_PRINT, PrintState.PRINTING, PrintState.PAUSED) or was_preparing_print or was_pending_start):
                 if self._state in (PrintState.PRE_PRINT, PrintState.PRINTING, PrintState.PAUSED):
                     if self._stop_requested:
@@ -671,6 +705,16 @@ class MqttQueue(Service):
                     self._reset_print_state()
             elif value == 8:
                 self._state = PrintState.IDLE
+            log.info(
+                "Printer state trace: ct=1000 value=%r (%s) internal=%s->%s stop_requested=%s pending_start=%s preparing=%s",
+                value,
+                self._print_state_value_label(value),
+                previous_state.value,
+                self._state.value,
+                stop_was_requested,
+                was_pending_start,
+                was_preparing_print,
+            )
             return
 
         if command_type not in (
@@ -832,6 +876,7 @@ class MqttQueue(Service):
                 "in_pre_print_window": self._state == PrintState.PRE_PRINT,
                 "pending_start": self._state == PrintState.PREPARING,
                 "state": self._last_state_value,
+                "state_label": self._print_state_value_label(self._last_state_value),
                 "preparing": self.is_preparing_print,
                 "started_at": self._print_started_at,
                 "last_progress": self._last_progress,
@@ -941,13 +986,41 @@ class MqttQueue(Service):
 
         lines = cli.util.normalize_gcode_lines(gcode)
         for line in lines:
+            if self._is_duplicate_g28(line):
+                log.info("Ignoring duplicate homing command: %s", line)
+                continue
             cmd = {
                 "commandType": MqttMsgType.ZZ_MQTT_CMD_GCODE_COMMAND.value,
                 "cmdData": line,
                 "cmdLen": len(line),
             }
+            log.info("Sending GCode command: %s", line)
             self.client.command(cmd)
             time.sleep(0.1)
+
+    def _is_duplicate_g28(self, line):
+        parts = line.split()
+        if not parts or parts[0].upper() != "G28":
+            return False
+
+        now = time.monotonic()
+        key = " ".join(part.upper() for part in parts)
+        last_key = getattr(self, "_last_g28_command", None)
+        last_at = getattr(self, "_last_g28_command_at", 0.0)
+        duplicate = key == last_key and now - last_at < G28_DEDUPE_WINDOW_SEC
+        if not duplicate:
+            self._last_g28_command = key
+            self._last_g28_command_at = now
+        return duplicate
+
+    def send_home(self, axis="all"):
+        axis = str(axis or "all").lower()
+        if axis not in HOME_GCODE_BY_AXIS:
+            raise ValueError(f"Unsupported home axis: {axis}")
+
+        gcode = HOME_GCODE_BY_AXIS[axis]
+        log.info("Sending home GCode axis=%s gcode=%s", axis, gcode)
+        self.send_gcode(gcode)
 
     def send_print_control(self, value):
         value = int(value)
@@ -987,6 +1060,22 @@ class MqttQueue(Service):
                 time.sleep(0.12)
                 self.client.command(flat_cmd)
                 time.sleep(0.18)
+        elif value in (2, 3):
+            nested_data = {"value": value}
+            if self._control_username:
+                nested_data["userName"] = self._control_username
+            nested_cmd = {
+                "commandType": MqttMsgType.ZZ_MQTT_CMD_PRINT_CONTROL.value,
+                "data": nested_data,
+            }
+            flat_cmd = {
+                "commandType": MqttMsgType.ZZ_MQTT_CMD_PRINT_CONTROL.value,
+                "value": value,
+            }
+            log.info("Print control attempt value=%s (nested + flat)", value)
+            self.client.command(nested_cmd)
+            time.sleep(0.12)
+            self.client.command(flat_cmd)
         else:
             cmd = {
                 "commandType": MqttMsgType.ZZ_MQTT_CMD_PRINT_CONTROL.value,

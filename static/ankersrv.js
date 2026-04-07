@@ -445,8 +445,8 @@ $(function () {
                 return;
             }
             if (data.commandType == 1000) {
-                // Printer state machine: value=0 idle, value=1 printing, value=2 paused
-                _updatePrintControlButtons(data.value);
+                // Printer state machine: normalize firmware resume acknowledgements for UI controls.
+                _updatePrintControlButtons(_normalizePrintStateValue(data.value));
                 if (typeof _onMqttStateChange === "function") {
                     _onMqttStateChange(data.value);
                 }
@@ -1365,6 +1365,16 @@ $(function () {
         }).catch(err => console.error("Failed to send GCode:", err));
     }
 
+    function sendPrinterHome(axis) {
+        const targetAxis = axis || "all";
+        console.log("Sending Home:", targetAxis);
+        fetch("/api/printer/home", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ axis: targetAxis })
+        }).catch(err => console.error("Failed to send home command:", err));
+    }
+
     function sendPrintControl(value) {
         console.log("Sending Print Control:", value);
         fetch("/api/printer/control", {
@@ -1375,7 +1385,6 @@ $(function () {
     }
 
     const PRINT_CONTROL = {
-        PREPARE_CANCEL: 0,
         PAUSE: 2,
         RESUME: 3,
         STOP: 4,
@@ -1386,13 +1395,22 @@ $(function () {
 
     let _currentPrintState = PRINT_STATE.IDLE;
 
+    function _normalizePrintStateValue(value) {
+        // Some firmware reports resume as ct=1000 value=3, while others report printing (1).
+        if (value === 3) {
+            return PRINT_STATE.PRINTING;
+        }
+        return value;
+    }
+
     function _updatePrintControlButtons(state) {
-        _currentPrintState = state;
-        const printing = state === PRINT_STATE.PRINTING;
-        const paused = state === PRINT_STATE.PAUSED;
-        const stopping = state === PRINT_STATE.STOPPING;
-        const preparing = state === PRINT_STATE.CALIBRATING;
-        const pendingStart = state === PRINT_STATE.PENDING_START;
+        const normalizedState = _normalizePrintStateValue(state);
+        _currentPrintState = normalizedState;
+        const printing = normalizedState === PRINT_STATE.PRINTING;
+        const paused = normalizedState === PRINT_STATE.PAUSED;
+        const stopping = normalizedState === PRINT_STATE.STOPPING;
+        const preparing = normalizedState === PRINT_STATE.CALIBRATING;
+        const pendingStart = normalizedState === PRINT_STATE.PENDING_START;
         const active = printing || paused || preparing || stopping || pendingStart;
         $("#print-pause").toggleClass("d-none", !printing || stopping);
         $("#print-resume").toggleClass("d-none", !paused || stopping);
@@ -1403,6 +1421,18 @@ $(function () {
     }
 
     const getStepDist = () => $('input[name="step-dist"]:checked').val() || "1";
+    let _lastHomeCommandAt = 0;
+    let _lastHomeCommand = null;
+
+    function sendHomeCommand(axis) {
+        const now = Date.now();
+        if (_lastHomeCommand === axis && now - _lastHomeCommandAt < 1000) {
+            return;
+        }
+        _lastHomeCommandAt = now;
+        _lastHomeCommand = axis;
+        sendPrinterHome(axis);
+    }
 
     $("#move-x-plus").on("click", function () { sendPrinterGCode(`G91\nG0 X${getStepDist()} F3000\nG90`); return false; });
     $("#move-x-minus").on("click", function () { sendPrinterGCode(`G91\nG0 X-${getStepDist()} F3000\nG90`); return false; });
@@ -1411,9 +1441,9 @@ $(function () {
     $("#move-z-plus").on("click", function () { sendPrinterGCode(`G91\nG0 Z${getStepDist()} F600\nG90`); return false; });
     $("#move-z-minus").on("click", function () { sendPrinterGCode(`G91\nG0 Z-${getStepDist()} F600\nG90`); return false; });
 
-    $("#control-home-xy").on("click", function () { sendPrinterGCode("G28 X Y"); return false; });
-    $("#control-home-z").on("click", function () { sendPrinterGCode("G28 Z"); return false; });
-    $("#control-home-all").on("click", function () { sendPrinterGCode("G28"); return false; });
+    $("#control-home-xy").on("click", function () { sendHomeCommand("xy"); return false; });
+    $("#control-home-z").on("click", function () { sendHomeCommand("z"); return false; });
+    $("#control-home-all").on("click", function () { sendHomeCommand("all"); return false; });
 
     // ------------------------------------------------------------------
     // Bed Level Map — shared rendering utilities
@@ -2212,7 +2242,7 @@ $(function () {
                 ? "Cancel the pending print before it starts?"
                 : "Are you sure you want to stop the print? This will also turn off heaters.";
         if (confirm(confirmText)) {
-            sendPrintControl((preparing || pendingStart) ? PRINT_CONTROL.PREPARE_CANCEL : PRINT_CONTROL.STOP);
+            sendPrintControl(PRINT_CONTROL.STOP);
             if (!preparing && !pendingStart) {
                 sendPrinterGCode("M104 S0\nM140 S0\nM106 S0");
             }

@@ -1681,6 +1681,21 @@ def app_api_printer_gcode():
     return {"status": "ok"}
 
 
+@app.post("/api/printer/home")
+def app_api_printer_home():
+    payload = request.get_json(silent=True) or {}
+    axis = str(payload.get("axis", "all")).lower()
+    if axis not in {"all", "xy", "z"}:
+        return {"error": "Invalid home axis"}, 400
+
+    with borrow_mqtt() as mqtt:
+        if mqtt.is_printing:
+            return {"error": "Motion commands blocked while printing"}, 409
+        mqtt.send_home(axis)
+
+    return {"status": "ok", "axis": axis}
+
+
 @app.post("/api/printer/control")
 def app_api_printer_control():
     payload = request.get_json(silent=True)

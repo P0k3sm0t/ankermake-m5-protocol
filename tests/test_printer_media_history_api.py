@@ -128,10 +128,12 @@ def test_printer_gcode_route_normalizes_safe_commands_and_blocks_motion_while_pr
 def test_printer_control_and_autolevel_routes_validate_and_dispatch():
     control_calls = []
     autolevel_calls = []
+    home_calls = []
     mqtt = SimpleNamespace(
         is_printing=False,
         send_print_control=lambda value: control_calls.append(value),
         send_auto_leveling=lambda: autolevel_calls.append(True),
+        send_home=lambda axis: home_calls.append(axis),
     )
     client = app.test_client()
     old_values, old_svc = _install_app_state(mqtt=mqtt)
@@ -151,9 +153,24 @@ def test_printer_control_and_autolevel_routes_validate_and_dispatch():
             "/api/printer/autolevel",
             headers={"X-Api-Key": API_KEY},
         )
+        home = client.post(
+            "/api/printer/home",
+            json={"axis": "xy"},
+            headers={"X-Api-Key": API_KEY},
+        )
+        bad_home = client.post(
+            "/api/printer/home",
+            json={"axis": "bad"},
+            headers={"X-Api-Key": API_KEY},
+        )
         mqtt.is_printing = True
         blocked = client.post(
             "/api/printer/autolevel",
+            headers={"X-Api-Key": API_KEY},
+        )
+        blocked_home = client.post(
+            "/api/printer/home",
+            json={"axis": "z"},
             headers={"X-Api-Key": API_KEY},
         )
     finally:
@@ -162,9 +179,13 @@ def test_printer_control_and_autolevel_routes_validate_and_dispatch():
     assert invalid.status_code == 400
     assert control.status_code == 200
     assert allowed.status_code == 200
+    assert home.status_code == 200
+    assert bad_home.status_code == 400
     assert blocked.status_code == 409
+    assert blocked_home.status_code == 409
     assert control_calls == [2]
     assert autolevel_calls == [True]
+    assert home_calls == ["xy"]
 
 
 def test_printer_z_offset_routes_refresh_set_and_nudge():
