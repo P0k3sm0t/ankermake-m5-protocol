@@ -2046,7 +2046,8 @@ $(function () {
             if (!resp.ok) {
                 const data = await resp.json().catch(() => ({}));
                 const msg = data.error || `HTTP ${resp.status}`;
-                flash_message(`Snapshot failed: ${msg}`, "warning");
+                const banner = /^snapshot\b/i.test(msg) ? msg : `Snapshot failed: ${msg}`;
+                flash_message(banner, "warning");
                 return;
             }
 
@@ -2058,7 +2059,9 @@ $(function () {
             a.click();
             URL.revokeObjectURL(url);
         } catch (err) {
-            flash_message(`Snapshot failed: ${err.message || err}`, "warning");
+            const msg = err.message || String(err);
+            const banner = /^snapshot\b/i.test(msg) ? msg : `Snapshot failed: ${msg}`;
+            flash_message(banner, "warning");
         } finally {
             btn.prop("disabled", false);
         }

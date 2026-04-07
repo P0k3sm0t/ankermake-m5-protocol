@@ -145,6 +145,25 @@ def _ffmpeg_available():
     return _ffmpeg_path() is not None
 
 
+SNAPSHOT_FRAME_WAIT_SEC = 3.0
+SNAPSHOT_FRAME_MAX_AGE_SEC = 2.0
+SNAPSHOT_FFMPEG_TIMEOUT_SEC = 30
+
+
+def _video_has_recent_frame(vq, wait_sec=SNAPSHOT_FRAME_WAIT_SEC, max_age_sec=SNAPSHOT_FRAME_MAX_AGE_SEC):
+    if not hasattr(vq, "last_frame_at"):
+        return True
+
+    deadline = time.monotonic() + wait_sec
+    while True:
+        last_frame_at = getattr(vq, "last_frame_at", None)
+        if last_frame_at is not None and time.monotonic() - last_frame_at <= max_age_sec:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
+
+
 def _configure_request_limits(flask_app, env=None):
     # Keep large GCode uploads configurable, but bound multipart metadata more
     # tightly. These form limits apply to multipart parsing, not the file size.
@@ -2186,6 +2205,8 @@ def app_api_snapshot():
         return {"error": "Video service not available"}, 503
     if not getattr(vq, "video_enabled", False):
         return {"error": "Enable video before taking a snapshot"}, 409
+    if not _video_has_recent_frame(vq):
+        return {"error": "Video is enabled, but no live camera frames are available yet. Wait for live video to appear and try again."}, 409
 
     host = os.getenv("FLASK_HOST") or "127.0.0.1"
     if host in {"0.0.0.0", "::"}:
@@ -2207,16 +2228,19 @@ def app_api_snapshot():
         result = subprocess.run(
             [ffmpeg_path, "-loglevel", "error", "-nostdin", "-y",
              "-f", "h264", "-i", url, "-frames:v", "1", temp_path],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=SNAPSHOT_FFMPEG_TIMEOUT_SEC,
         )
         if result.returncode != 0:
             # Retry without -f h264
             result = subprocess.run(
                 [ffmpeg_path, "-loglevel", "error", "-nostdin", "-y",
                  "-i", url, "-frames:v", "1", temp_path],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=SNAPSHOT_FFMPEG_TIMEOUT_SEC,
             )
         if result.returncode != 0 or not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
+            stderr = result.stderr.decode("utf-8", errors="replace").strip()
+            if stderr:
+                log.warning("Snapshot ffmpeg failed: %s", stderr)
             try:
                 os.remove(temp_path)
             except OSError:
@@ -2238,12 +2262,18 @@ def app_api_snapshot():
         return send_file(temp_path, mimetype="image/jpeg",
                          as_attachment=True,
                          download_name=f"ankerctl_snapshot_{timestamp}.jpg")
-    except (subprocess.TimeoutExpired, OSError) as err:
+    except subprocess.TimeoutExpired:
         try:
             os.remove(temp_path)
         except OSError:
             pass
-        return {"error": f"Snapshot failed: {err}"}, 500
+        return {"error": "Snapshot timed out waiting for a camera frame. Wait for live video to update and try again."}, 504
+    except OSError as err:
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+        return {"error": f"Snapshot could not run ffmpeg: {err}"}, 500
 
 @app.get("/api/history")
 def app_api_history():

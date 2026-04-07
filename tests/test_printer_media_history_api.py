@@ -1,5 +1,6 @@
 from contextlib import contextmanager
 from datetime import datetime
+import subprocess
 from types import SimpleNamespace
 
 from cli.model import Account, Config, Printer
@@ -330,11 +331,42 @@ def test_snapshot_route_reports_expected_error_paths(monkeypatch):
     finally:
         _restore_app_state(old_values, old_svc)
 
+    monkeypatch.setattr("web._video_has_recent_frame", lambda vq: False)
+    old_values, old_svc = _install_app_state(
+        video_supported=True,
+        videoqueue=SimpleNamespace(video_enabled=True, last_frame_at=None),
+    )
+    try:
+        no_frames = client.get("/api/snapshot", headers={"X-Api-Key": API_KEY})
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    monkeypatch.setattr("web._video_has_recent_frame", lambda vq: True)
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs.get("timeout"))
+        ),
+    )
+    old_values, old_svc = _install_app_state(
+        video_supported=True,
+        videoqueue=SimpleNamespace(video_enabled=True, last_frame_at=123.0),
+    )
+    try:
+        timeout = client.get("/api/snapshot", headers={"X-Api-Key": API_KEY})
+    finally:
+        _restore_app_state(old_values, old_svc)
+
     assert not_supported.status_code == 400
     assert no_ffmpeg.status_code == 500
     assert no_service.status_code == 503
     assert video_disabled.status_code == 409
     assert "Enable video" in video_disabled.get_json()["error"]
+    assert no_frames.status_code == 409
+    assert "no live camera frames" in no_frames.get_json()["error"]
+    assert timeout.status_code == 504
+    assert "timed out" in timeout.get_json()["error"]
+    assert "Command" not in timeout.get_json()["error"]
 
 
 def test_unsupported_device_guard_blocks_printer_control_routes():
