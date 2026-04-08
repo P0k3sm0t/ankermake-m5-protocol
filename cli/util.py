@@ -84,8 +84,9 @@ class FileSizeType(click.ParamType):
 
 def parse_json(msg):
     if isinstance(msg, dict):
-        for key, value in msg.items():
-            msg[key] = parse_json(value)
+        return {key: parse_json(value) for key, value in msg.items()}
+    elif isinstance(msg, list):
+        return [parse_json(value) for value in msg]
     elif isinstance(msg, str):
         try:
             msg = parse_json(json.loads(msg))

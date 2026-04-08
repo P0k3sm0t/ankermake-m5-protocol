@@ -16,6 +16,7 @@ from web import (
     _filament_service_length,
     _filament_service_temp,
     _format_signed_mm,
+    _probe_printer_storage_files,
     _parse_z_offset_mm,
     _resolve_apprise,
     _safe_same_site_redirect_target,
@@ -309,6 +310,53 @@ def test_root_shows_ffmpeg_warning_only_for_camera_capable_devices(monkeypatch):
     assert "Camera features need `ffmpeg`" in camera.get_data(as_text=True)
     assert no_camera.status_code == 200
     assert "Camera features need `ffmpeg`" not in no_camera.get_data(as_text=True)
+
+
+def test_probe_printer_storage_files_uses_one_shot_mqtt_probe(monkeypatch):
+    cfg = Config(
+        account=Account(
+            auth_token="token",
+            region="eu",
+            user_id="user-1",
+            email="user@example.com",
+        ),
+        printers=[_printer("SN1", "Printer One", ip_addr="192.168.1.10")],
+    )
+    manager = FakeConfigManager(cfg)
+    disconnects = []
+    fake_client = SimpleNamespace(_mqtt=SimpleNamespace(disconnect=lambda: disconnects.append(True)))
+
+    old_values = {
+        "config": app.config.get("config"),
+        "printer_index": app.config.get("printer_index"),
+        "insecure": app.config.get("insecure"),
+    }
+    app.config["config"] = manager
+    app.config["printer_index"] = 0
+    app.config["insecure"] = False
+
+    monkeypatch.setattr("web.cli.mqtt.mqtt_open", lambda config, printer_index, insecure: fake_client)
+    monkeypatch.setattr(
+        "web.cli.mqtt.mqtt_file_list_probe",
+        lambda client, source, source_value, timeout, collect_window: {
+            "request": {"commandType": 1009, "value": 1},
+            "source_value": 1,
+            "reply_count": 1,
+            "replies": [{"commandType": 1009, "reply": 0}],
+            "files": [{"name": "cube.gcode", "path": "/usr/data/local/model/cube.gcode", "timestamp": 123, "source": "onboard"}],
+        },
+    )
+
+    try:
+        result, error = _probe_printer_storage_files(source="onboard")
+    finally:
+        for key, value in old_values.items():
+            app.config[key] = value
+
+    assert error is None
+    assert result["source_value"] == 1
+    assert result["files"][0]["path"] == "/usr/data/local/model/cube.gcode"
+    assert disconnects == [True]
 
 
 def test_printer_control_guard_without_login():

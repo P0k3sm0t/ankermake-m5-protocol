@@ -105,6 +105,7 @@ def test_extract_layer_count_reads_header_and_falls_back_to_markers():
 
 def test_json_and_http_helpers():
     assert parse_json({"nested": '{"value": 1}'}) == {"nested": {"value": 1}}
+    assert parse_json({"nested": '[{"value": 1}]'}) == {"nested": [{"value": 1}]}
     assert '"value": 1' in pretty_json('{"value": 1}')
     assert parse_http_bool("true") is True
     assert parse_http_bool("0") is False

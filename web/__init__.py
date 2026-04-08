@@ -72,6 +72,7 @@ import web.util
 import cli.util
 import cli.config
 import cli.countrycodes
+import cli.mqtt
 from cli.model import (
     UPLOAD_RATE_MBPS_CHOICES,
     default_apprise_config,
@@ -1463,6 +1464,66 @@ def app_api_files_local():
     }
 
 
+@app.get("/api/files/printer")
+def app_api_files_printer():
+    source = str(request.args.get("source", "onboard") or "onboard").strip().lower()
+    if source not in {"onboard", "usb"}:
+        return {"error": "Invalid storage source"}, 400
+    raw_value = request.args.get("value")
+    source_value = None
+    if raw_value not in (None, ""):
+        try:
+            source_value = int(raw_value)
+        except ValueError:
+            return {"error": "value must be an integer"}, 400
+
+    result, error = _probe_printer_storage_files(source=source, source_value=source_value)
+    if error:
+        payload, status = error
+        return payload, status
+
+    return {
+        "status": "ok",
+        "source": "onboard" if result["source_value"] == 1 else source,
+        "source_value": result["source_value"],
+        "reply_count": result["reply_count"],
+        "files": result["files"],
+    }
+
+
+@app.post("/api/files/printer/print")
+def app_api_files_printer_print():
+    payload = request.get_json(silent=True) or {}
+    source = str(payload.get("source", "") or "").strip().lower() or None
+    if source is not None and source not in {"onboard", "usb"}:
+        return {"error": "Invalid storage source"}, 400
+
+    try:
+        file_path, inferred_source = _validate_printer_storage_path(payload.get("path"), source=source)
+    except ValueError as exc:
+        return {"error": str(exc)}, 400
+
+    with borrow_mqtt() as mqtt:
+        if mqtt.is_printing or mqtt.has_pending_print_start or mqtt.is_preparing_print:
+            return {"error": "Printer is already busy with another print job"}, 409
+        started = mqtt.start_stored_file(file_path)
+
+    if not started:
+        return {
+            "error": (
+                "Selected file preview loaded, but the printer did not confirm the job start. "
+                "Stored-file launching is still incomplete for this firmware."
+            )
+        }, 504
+
+    return {
+        "status": "ok",
+        "source": inferred_source,
+        "path": file_path,
+        "name": os.path.basename(file_path),
+    }
+
+
 @app.post("/api/ankerctl/config/upload-rate")
 def app_api_ankerctl_config_upload_rate():
     config = app.config["config"]
@@ -1965,6 +2026,61 @@ def _disconnect_mqtt_client(client):
         mqtt_client.disconnect()
     except Exception as exc:
         log.debug(f"MQTT client disconnect failed: {exc}")
+
+
+def _probe_printer_storage_files(source="onboard", source_value=None, timeout=5.0, collect_window=1.0):
+    config = app.config.get("config")
+    if not config:
+        return None, ({"error": "No configuration loaded"}, 503)
+
+    with config.open() as cfg:
+        if not cfg:
+            return None, ({"error": "No printers configured"}, 503)
+
+    try:
+        source_value = cli.mqtt.mqtt_file_list_source_value(source=source, value=source_value)
+    except (TypeError, ValueError):
+        return None, ({"error": "Invalid storage source"}, 400)
+
+    printer_index = app.config.get("printer_index", 0)
+    insecure = app.config.get("insecure", False)
+
+    client = None
+    try:
+        client = cli.mqtt.mqtt_open(config, printer_index, insecure)
+        result = cli.mqtt.mqtt_file_list_probe(
+            client,
+            source=source,
+            source_value=source_value,
+            timeout=timeout,
+            collect_window=collect_window,
+        )
+    except Exception as exc:
+        log.warning(f"storage-file-list: MQTT probe failed: {exc}")
+        return None, ({"error": f"MQTT storage probe failed: {exc}"}, 503)
+    finally:
+        if client is not None:
+            _disconnect_mqtt_client(client)
+
+    if not result.get("replies"):
+        return None, ({"error": f"No response from printer for storage source '{source}'"}, 504)
+
+    return result, None
+
+
+def _validate_printer_storage_path(file_path, source=None):
+    if not isinstance(file_path, str) or not file_path.strip():
+        raise ValueError("Stored file path is required")
+
+    normalized_path = file_path.strip()
+    inferred_source = cli.mqtt.infer_storage_source_from_path(normalized_path)
+    if inferred_source not in {"onboard", "usb"}:
+        raise ValueError("Unsupported stored file path")
+
+    if source is not None and inferred_source != source:
+        raise ValueError(f"Stored file path does not match source '{source}'")
+
+    return normalized_path, inferred_source
 
 
 def _clean_printer_report_output(raw_output):

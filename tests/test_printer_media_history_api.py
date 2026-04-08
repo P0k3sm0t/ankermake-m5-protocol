@@ -189,6 +189,147 @@ def test_printer_control_and_autolevel_routes_validate_and_dispatch():
     assert home_calls == ["xy"]
 
 
+def test_printer_storage_file_list_route_returns_files_and_validates_input(monkeypatch):
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(mqtt=SimpleNamespace())
+    calls = []
+
+    def fake_probe(source="onboard", source_value=None, timeout=5.0, collect_window=1.0):
+        calls.append((source, source_value, timeout, collect_window))
+        files = [{
+            "name": "cube.gcode" if source == "onboard" else "usb-part.gcode",
+            "path": "/usr/data/local/model/cube.gcode" if source == "onboard" else "/tmp/udisk/udisk1/usb-part.gcode",
+            "timestamp": 123,
+            "source": source,
+        }]
+        return ({
+            "source_value": 1 if source == "onboard" else 0,
+            "reply_count": 1,
+            "files": files,
+            "replies": [{"commandType": 1009, "reply": 0}],
+        }, None)
+
+    monkeypatch.setattr("web._probe_printer_storage_files", fake_probe)
+
+    try:
+        onboard = client.get("/api/files/printer?source=onboard", headers={"X-Api-Key": API_KEY})
+        usb = client.get("/api/files/printer?source=usb", headers={"X-Api-Key": API_KEY})
+        bad_value = client.get("/api/files/printer?value=abc", headers={"X-Api-Key": API_KEY})
+        bad_source = client.get("/api/files/printer?source=cloud", headers={"X-Api-Key": API_KEY})
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert onboard.status_code == 200
+    assert onboard.get_json()["source"] == "onboard"
+    assert onboard.get_json()["files"][0]["path"] == "/usr/data/local/model/cube.gcode"
+    assert usb.status_code == 200
+    assert usb.get_json()["source"] == "usb"
+    assert usb.get_json()["files"][0]["path"] == "/tmp/udisk/udisk1/usb-part.gcode"
+    assert bad_value.status_code == 400
+    assert bad_source.status_code == 400
+    assert calls == [
+        ("onboard", None, 5.0, 1.0),
+        ("usb", None, 5.0, 1.0),
+    ]
+
+
+def test_printer_storage_file_list_route_surfaces_probe_errors(monkeypatch):
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(mqtt=SimpleNamespace())
+    monkeypatch.setattr(
+        "web._probe_printer_storage_files",
+        lambda source="onboard", source_value=None, timeout=5.0, collect_window=1.0: (
+            None,
+            ({"error": "No response from printer for storage source 'usb'"}, 504),
+        ),
+    )
+
+    try:
+        response = client.get("/api/files/printer?source=usb", headers={"X-Api-Key": API_KEY})
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert response.status_code == 504
+    assert "No response from printer" in response.get_json()["error"]
+
+
+def test_printer_storage_print_route_validates_dispatches_and_blocks_when_busy():
+    start_calls = []
+    mqtt = SimpleNamespace(
+        is_printing=False,
+        has_pending_print_start=False,
+        is_preparing_print=False,
+        start_stored_file=lambda path: (start_calls.append(path) or True),
+    )
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(mqtt=mqtt)
+
+    try:
+        usb = client.post(
+            "/api/files/printer/print",
+            json={"source": "usb", "path": "/tmp/udisk/udisk1/Top parts 5h_PETG_M5 grey.gcode"},
+            headers={"X-Api-Key": API_KEY},
+        )
+        onboard = client.post(
+            "/api/files/printer/print",
+            json={"source": "onboard", "path": "/usr/data/local/model/AnkerMake Model/Autodesk_Kickstarter_Geometry.gcode"},
+            headers={"X-Api-Key": API_KEY},
+        )
+        bad_source = client.post(
+            "/api/files/printer/print",
+            json={"source": "cloud", "path": "/tmp/udisk/udisk1/file.gcode"},
+            headers={"X-Api-Key": API_KEY},
+        )
+        mismatched = client.post(
+            "/api/files/printer/print",
+            json={"source": "usb", "path": "/usr/data/local/model/model.gcode"},
+            headers={"X-Api-Key": API_KEY},
+        )
+        mqtt.is_printing = True
+        busy = client.post(
+            "/api/files/printer/print",
+            json={"source": "usb", "path": "/tmp/udisk/udisk1/another.gcode"},
+            headers={"X-Api-Key": API_KEY},
+        )
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert usb.status_code == 200
+    assert usb.get_json()["source"] == "usb"
+    assert onboard.status_code == 200
+    assert onboard.get_json()["source"] == "onboard"
+    assert bad_source.status_code == 400
+    assert mismatched.status_code == 400
+    assert busy.status_code == 409
+    assert start_calls == [
+        "/tmp/udisk/udisk1/Top parts 5h_PETG_M5 grey.gcode",
+        "/usr/data/local/model/AnkerMake Model/Autodesk_Kickstarter_Geometry.gcode",
+    ]
+
+
+def test_printer_storage_print_route_returns_error_when_printer_never_confirms_start():
+    mqtt = SimpleNamespace(
+        is_printing=False,
+        has_pending_print_start=False,
+        is_preparing_print=False,
+        start_stored_file=lambda path: False,
+    )
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(mqtt=mqtt)
+
+    try:
+        response = client.post(
+            "/api/files/printer/print",
+            json={"source": "usb", "path": "/tmp/udisk/udisk1/Top parts 5h_PETG_M5 grey.gcode"},
+            headers={"X-Api-Key": API_KEY},
+        )
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert response.status_code == 504
+    assert "did not confirm the job start" in response.get_json()["error"]
+
+
 def test_printer_z_offset_routes_refresh_set_and_nudge():
     send_calls = []
     state = {"available": True, "steps": 12, "mm": 0.12, "source": "cached", "seq": 1}
