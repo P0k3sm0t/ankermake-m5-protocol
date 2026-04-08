@@ -136,6 +136,26 @@ def test_handle_notification_start_finish_and_failure_paths(monkeypatch):
     ]
 
 
+def test_deferred_filename_starts_timelapse_after_print_state(monkeypatch):
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+    monkeypatch.setattr("web.service.mqtt.time.monotonic", lambda: 100.0)
+
+    queue._handle_notification({"commandType": 1000, "value": 1})
+
+    assert queue._state == PrintState.PRINTING
+    assert queue._pending_history_start is True
+    assert history_calls == []
+    assert timelapse_calls == []
+
+    queue._handle_notification({"commandType": 1044, "filePath": "/tmp/deferred.gcode"})
+
+    assert queue._pending_history_start is False
+    assert history_calls == [("start", ("deferred.gcode",), {"task_id": None})]
+    assert timelapse_calls == [("start", "deferred.gcode")]
+
+
 def test_handle_notification_aborts_active_print_on_value_8(monkeypatch):
     global ha_updates, history_calls, timelapse_calls, events
     ha_updates, history_calls, timelapse_calls, events = [], [], [], []

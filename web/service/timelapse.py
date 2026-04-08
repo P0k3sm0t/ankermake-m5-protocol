@@ -22,6 +22,18 @@ _IN_PROGRESS_SUBDIR = "in_progress"
 _MAX_ORPHAN_AGE_SEC = 24 * 3600  # 24 hours
 
 
+def _resolve_ffmpeg_path():
+    """Find ffmpeg using the same fallback path as the web snapshot route."""
+    try:
+        from web import _ffmpeg_path as web_ffmpeg_path  # Lazy import avoids circular deps
+        ffmpeg_path = web_ffmpeg_path()
+        if ffmpeg_path:
+            return ffmpeg_path
+    except Exception as err:
+        log.debug(f"Timelapse: web ffmpeg lookup unavailable: {err}")
+    return shutil.which("ffmpeg")
+
+
 class TimelapseService:
     """Captures periodic snapshots during a print and assembles a timelapse video."""
 
@@ -252,7 +264,7 @@ class TimelapseService:
         if not filename or filename.strip().lower() in {"unknown", "unknown.gcode", ""}:
             log.debug(f"Timelapse: skipping placeholder filename {filename!r}")
             return
-        if not shutil.which("ffmpeg"):
+        if not _resolve_ffmpeg_path():
             log.warning("Timelapse: ffmpeg not available, skipping")
             return
 
@@ -413,6 +425,10 @@ class TimelapseService:
     def _take_snapshot(self):
         """Capture a single frame using ffmpeg."""
         from web import app  # Lazy import to avoid circular deps
+        ffmpeg_path = _resolve_ffmpeg_path()
+        if not ffmpeg_path:
+            log.warning("Timelapse: ffmpeg not available, skipping snapshot")
+            return
 
         host = os.getenv("FLASK_HOST") or "127.0.0.1"
         if host in {"0.0.0.0", "::"}:
@@ -436,13 +452,15 @@ class TimelapseService:
                 vq.api_light_state(True)
                 time.sleep(1.5)
 
-        self._await_video_frame()
-
         frame_path = os.path.join(self._current_dir, f"frame_{self._frame_count:05d}.jpg")
         try:
+            if not self._await_video_frame():
+                log.debug("Timelapse: no recent video frame, skipping snapshot")
+                return
+
             result = subprocess.run(
                 [
-                    "ffmpeg", "-loglevel", "error", "-nostdin", "-y",
+                    ffmpeg_path, "-loglevel", "error", "-nostdin", "-y",
                     "-f", "h264", "-i", url,
                     "-frames:v", "1",
                     frame_path,
@@ -455,7 +473,7 @@ class TimelapseService:
                 # Retry without format hint
                 result = subprocess.run(
                     [
-                        "ffmpeg", "-loglevel", "error", "-nostdin", "-y",
+                        ffmpeg_path, "-loglevel", "error", "-nostdin", "-y",
                         "-i", url,
                         "-frames:v", "1",
                         frame_path,
@@ -473,6 +491,23 @@ class TimelapseService:
                     os.remove(frame_path)
                 except OSError:
                     pass
+                stderr = getattr(result, "stderr", b"").decode(errors="ignore").strip()
+                if stderr:
+                    log.warning(f"Timelapse: snapshot failed: {stderr}")
+                else:
+                    log.warning("Timelapse: snapshot failed")
+        except subprocess.TimeoutExpired:
+            try:
+                os.remove(frame_path)
+            except OSError:
+                pass
+            log.warning("Timelapse: snapshot timed out waiting for a camera frame")
+        except OSError as err:
+            try:
+                os.remove(frame_path)
+            except OSError:
+                pass
+            log.warning(f"Timelapse: snapshot could not run ffmpeg: {err}")
         finally:
             # Always restore light even if ffmpeg timed out or raised an exception
             if vq and snap_original_light is not True:
@@ -581,11 +616,15 @@ class TimelapseService:
         fps = max(1, min(30, math.ceil(frame_count / 30)))
 
         input_pattern = os.path.join(dir_path, "frame_%05d.jpg")
+        ffmpeg_path = _resolve_ffmpeg_path()
+        if not ffmpeg_path:
+            log.warning("Timelapse: ffmpeg not available, skipping assembly")
+            return
 
         try:
             result = subprocess.run(
                 [
-                    "ffmpeg", "-loglevel", "error", "-nostdin", "-y",
+                    ffmpeg_path, "-loglevel", "error", "-nostdin", "-y",
                     "-framerate", str(fps),
                     "-i", input_pattern,
                     "-c:v", "libx264", "-pix_fmt", "yuv420p",

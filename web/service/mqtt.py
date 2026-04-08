@@ -190,15 +190,23 @@ class MqttQueue(Service):
             self._history.record_start(effective_filename, task_id=self._last_task_id)
             self._pending_history_start = False
             log.info(f"Print started, filename={effective_filename!r}")
+            self._timelapse.start_capture(effective_filename)
         else:
             self._pending_history_start = True
             log.info("Print started, history deferred (no filename yet)")
 
-        self._timelapse.start_capture(effective_filename or "unknown")
         self._ha.update_state(print_status="printing")
         self._send_event(EVENT_PRINT_STARTED, self._build_payload(payload, progress))
 
         return True
+
+    def _complete_deferred_print_start(self):
+        """Record and start helpers when filename arrives after print activation."""
+        if self._state == PrintState.PRINTING and self._pending_history_start and self._last_filename:
+            self._history.record_start(self._last_filename, task_id=self._last_task_id)
+            self._timelapse.start_capture(self._last_filename)
+            self._pending_history_start = False
+            log.info(f"Print start completed after filename arrived, filename={self._last_filename!r}")
 
     @property
     def is_printing(self):
@@ -630,9 +638,7 @@ class MqttQueue(Service):
                 self._last_filename = os.path.basename(file_path)
                 log.info(f"History: captured filename from ct 1044: {self._last_filename}")
             # If ct=1000 value=1 arrived before ct=1044, record the start now that we have the filename
-            if self._state == PrintState.PRINTING and self._pending_history_start and self._last_filename:
-                self._history.record_start(self._last_filename, task_id=self._last_task_id)
-                self._pending_history_start = False
+            self._complete_deferred_print_start()
             # Activate print early so Stop sends value=4 (not the prepare-cancel path)
             # during the G28/calibration window before ct=1000 value=1 arrives.
             # Only activate if a print was actually requested (PREPARING state),
@@ -755,6 +761,7 @@ class MqttQueue(Service):
                     filename = self._last_filename
             else:
                 self._last_filename = filename
+            self._complete_deferred_print_start()
 
         if self._last_progress is not None and progress < self._last_progress and progress <= 1:
             same_task = task_id and prev_task_id and task_id == prev_task_id
