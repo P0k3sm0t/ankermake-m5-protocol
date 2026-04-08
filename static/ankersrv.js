@@ -1391,6 +1391,7 @@ $(function () {
     const PRINT_STATE = { IDLE: 0, PRINTING: 1, PAUSED: 2, CALIBRATING: 8, STOPPING: 9, PENDING_START: 10 };
 
     let _currentPrintState = PRINT_STATE.IDLE;
+    let _lastStopCommandAt = 0;
 
     function _normalizePrintStateValue(value) {
         // Some firmware reports resume as ct=1000 value=3, while others report printing (1).
@@ -2237,7 +2238,8 @@ $(function () {
         return false;
     });
     $("#print-stop").on("click", function () {
-        if (_currentPrintState === PRINT_STATE.STOPPING) {
+        const now = Date.now();
+        if (now - _lastStopCommandAt < 1000) {
             return false;
         }
         const preparing = _currentPrintState === PRINT_STATE.CALIBRATING;
@@ -2246,13 +2248,10 @@ $(function () {
             ? "Cancel the printer prepare phase before the print starts?"
             : pendingStart
                 ? "Cancel the pending print before it starts?"
-                : "Are you sure you want to stop the print? This will also turn off heaters.";
+                : "Are you sure you want to stop the print?";
         if (confirm(confirmText)) {
+            _lastStopCommandAt = now;
             sendPrintControl(PRINT_CONTROL.STOP);
-            if (!preparing && !pendingStart) {
-                sendPrinterGCode("M104 S0\nM140 S0\nM106 S0");
-            }
-            _updatePrintControlButtons(PRINT_STATE.STOPPING);
         }
         return false;
     });

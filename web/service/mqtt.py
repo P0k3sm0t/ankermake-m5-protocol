@@ -1073,7 +1073,7 @@ class MqttQueue(Service):
                 time.sleep(0.12)
                 self.client.command(flat_cmd)
                 time.sleep(0.18)
-        elif value in (2, 3):
+        elif value in (2, 3, 4):
             nested_data = {"value": value}
             if self._control_username:
                 nested_data["userName"] = self._control_username

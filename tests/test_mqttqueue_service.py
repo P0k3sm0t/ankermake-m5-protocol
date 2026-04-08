@@ -220,6 +220,23 @@ def test_send_pause_resume_print_control_uses_nested_and_flat_payloads():
     assert queue._stop_requested is False
 
 
+def test_send_stop_print_control_uses_nested_and_flat_payloads_for_active_print():
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+    sent = []
+    queue.client = SimpleNamespace(command=lambda payload: sent.append(payload))
+    queue._state = PrintState.PRINTING
+
+    queue.send_print_control(4)
+
+    assert sent == [
+        {"commandType": 1008, "data": {"value": 4, "userName": "tester@example.com"}},
+        {"commandType": 1008, "value": 4},
+    ]
+    assert queue._stop_requested is True
+
+
 def test_send_gcode_dedupes_identical_g28_commands(monkeypatch):
     global ha_updates, history_calls, timelapse_calls, events
     ha_updates, history_calls, timelapse_calls, events = [], [], [], []
