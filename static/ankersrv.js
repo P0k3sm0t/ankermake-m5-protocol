@@ -2822,16 +2822,20 @@ $(function () {
                 const tbody = $("#history-tbody");
                 if (!append) tbody.empty();
                 if (data.entries.length === 0 && !append) {
-                    tbody.html('<tr><td colspan="4" class="text-center text-muted py-4">No history yet</td></tr>');
+                    tbody.html('<tr><td colspan="5" class="text-center text-muted py-4">No history yet</td></tr>');
                 }
                 data.entries.forEach(e => {
                     const started = e.started_at ? new Date(e.started_at + "Z").toLocaleString() : "-";
                     const safeFilename = escapeHtml(e.filename);
+                    const actionCell = e.can_reprint
+                        ? `<button class="btn btn-sm btn-outline-primary history-reprint-btn" data-history-id="${e.id}" data-history-name="${safeFilename}">Reprint</button>`
+                        : '<span class="text-muted small">-</span>';
                     const row = `<tr>
                         <td class="text-truncate" style="max-width:200px;" title="${safeFilename}">${safeFilename}</td>
                         <td>${statusBadge(e.status)}</td>
                         <td class="small">${started}</td>
                         <td>${formatDuration(e.duration_sec)}</td>
+                        <td class="text-end">${actionCell}</td>
                     </tr>`;
                     tbody.append(row);
                 });
@@ -2868,6 +2872,33 @@ $(function () {
                 historyOffset = 0;
                 loadHistory(false);
             });
+    });
+
+    $(document).on("click", ".history-reprint-btn", async function () {
+        const btn = $(this);
+        const entryId = btn.attr("data-history-id");
+        const entryName = btn.attr("data-history-name") || "selected file";
+        if (!entryId) {
+            return;
+        }
+        if (!confirm(`Reprint ${entryName}?`)) {
+            return;
+        }
+        btn.prop("disabled", true);
+        try {
+            const resp = await fetch(`/api/history/${encodeURIComponent(entryId)}/reprint`, {
+                method: "POST",
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) {
+                throw new Error(data.error || `HTTP ${resp.status}`);
+            }
+            flash_message(`Reprint upload started for ${entryName}`, "success");
+        } catch (err) {
+            flash_message(`Reprint failed: ${err.message || err}`, "danger");
+        } finally {
+            btn.prop("disabled", false);
+        }
     });
 
     /**

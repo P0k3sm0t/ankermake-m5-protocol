@@ -70,3 +70,37 @@ def test_history_clear_and_fallback_finish_latest_active(tmp_path):
 
     history.clear()
     assert history.get_count() == 0
+
+
+def test_archive_upload_and_reprint_flags(tmp_path):
+    history = PrintHistory(db_path=tmp_path / "history.db")
+
+    archive_info = history.archive_upload("cube.gcode", b"G28\nM104 S200\n")
+    row_id = history.record_start(
+        "cube.gcode",
+        task_id="task-archive",
+        archive_relpath=archive_info["archive_relpath"],
+        archive_size=archive_info["archive_size"],
+    )
+
+    entry = history.get_entry(row_id)
+
+    assert entry["archive_available"] is True
+    assert entry["can_reprint"] is True
+    assert history.get_archive_path(row_id) is not None
+
+
+def test_history_clear_removes_archived_gcode_files(tmp_path):
+    history = PrintHistory(db_path=tmp_path / "history.db")
+
+    archive_info = history.archive_upload("cube.gcode", b"G28\n")
+    row_id = history.record_start(
+        "cube.gcode",
+        archive_relpath=archive_info["archive_relpath"],
+        archive_size=archive_info["archive_size"],
+    )
+    assert history.get_archive_path(row_id) is not None
+
+    history.clear()
+
+    assert history.get_archive_path(row_id) is None

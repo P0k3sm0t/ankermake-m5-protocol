@@ -2537,6 +2537,57 @@ def app_api_history_clear():
     return {"status": "ok"}
 
 
+@app.post("/api/history/<int:entry_id>/reprint")
+def app_api_history_reprint(entry_id):
+    user_name = request.headers.get("User-Agent", "ankerctl").split(url_for('app_root'))[0]
+    printer_index = app.config.get("printer_index", 0)
+
+    with borrow_mqtt() as mqtt:
+        if not mqtt:
+            return {"error": "Service unavailable"}, 503
+        if mqtt.is_printing or mqtt.has_pending_print_start or mqtt.is_preparing_print:
+            return {"error": "Printer is already busy with another print job"}, 409
+        entry = mqtt.history.get_entry(entry_id)
+        if not entry:
+            return {"error": "History entry not found"}, 404
+        archive_path = mqtt.history.get_archive_path(entry_id)
+        if not archive_path:
+            return {"error": "No archived GCode is available for this history entry"}, 404
+
+    with app.config["config"].open() as cfg:
+        rate_limit_mbps, rate_limit_source = cli.util.resolve_upload_rate_mbps_with_source(cfg)
+
+    with open(archive_path, "rb") as fh:
+        archive_bytes = fh.read()
+
+    with app.svc.borrow("filetransfer") as ft:
+        if not ft:
+            return {"error": "File transfer service unavailable"}, 503
+        try:
+            ft.send_bytes(
+                archive_bytes,
+                entry["filename"],
+                user_name,
+                rate_limit_mbps=rate_limit_mbps,
+                start_print=True,
+                printer_index=printer_index,
+                archive_info={
+                    "archive_relpath": entry.get("archive_relpath"),
+                    "archive_size": entry.get("archive_size"),
+                },
+            )
+        except ConnectionError as exc:
+            log.error(f"History reprint connection error: {exc}")
+            return {"error": str(exc)}, 503
+
+    return {
+        "status": "ok",
+        "name": entry["filename"],
+        "upload_rate_mbps": rate_limit_mbps,
+        "upload_rate_source": rate_limit_source,
+    }
+
+
 @app.get("/api/filaments")
 def app_api_filaments_list():
     """List all filament profiles."""

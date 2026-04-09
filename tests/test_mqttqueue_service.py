@@ -367,6 +367,27 @@ def test_stored_file_selection_waits_for_exact_filepath_preview():
     assert queue._await_stored_file_selection(target_path, timeout_sec=0.0) is True
 
 
+def test_uploaded_archive_is_attached_to_next_history_start():
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+
+    queue.mark_pending_print_start(
+        "cube.gcode",
+        archive_info={"archive_relpath": "saved/cube.gcode", "archive_size": 1234},
+    )
+    queue._handle_notification({"commandType": 1044, "filePath": "/tmp/cube.gcode"})
+    queue._handle_notification({"commandType": 1000, "value": 1})
+
+    start_records = [call for call in history_calls if call[0] == "start"]
+    assert len(start_records) == 1
+    assert start_records[0][2] == {
+        "task_id": None,
+        "archive_relpath": "saved/cube.gcode",
+        "archive_size": 1234,
+    }
+
+
 def test_derive_control_display_name_uses_email_local_part():
     assert MqttQueue._derive_control_display_name("tester@example.com") == "tester"
     assert MqttQueue._derive_control_display_name("plain-user") == "plain-user"

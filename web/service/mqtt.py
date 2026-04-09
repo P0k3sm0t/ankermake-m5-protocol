@@ -156,6 +156,7 @@ class MqttQueue(Service):
         self._preview_file_path = None
         self._pending_history_start = False
         self._stop_requested = False
+        self._pending_archive_info = None
         self._pending_stored_file_path = None
         self._last_selected_storage_file_path = None
         self._last_selected_storage_file_name = None
@@ -208,7 +209,12 @@ class MqttQueue(Service):
         effective_filename = filename or self._last_filename
 
         if effective_filename:
-            self._history.record_start(effective_filename, task_id=self._last_task_id)
+            archive_info = self._claim_pending_archive_info(effective_filename)
+            record_kwargs = {"task_id": self._last_task_id}
+            if archive_info:
+                record_kwargs["archive_relpath"] = archive_info.get("archive_relpath")
+                record_kwargs["archive_size"] = archive_info.get("archive_size")
+            self._history.record_start(effective_filename, **record_kwargs)
             self._pending_history_start = False
             log.info(f"Print started, filename={effective_filename!r}")
             self._timelapse.start_capture(effective_filename)
@@ -224,7 +230,12 @@ class MqttQueue(Service):
     def _complete_deferred_print_start(self):
         """Record and start helpers when filename arrives after print activation."""
         if self._state == PrintState.PRINTING and self._pending_history_start and self._last_filename:
-            self._history.record_start(self._last_filename, task_id=self._last_task_id)
+            archive_info = self._claim_pending_archive_info(self._last_filename)
+            record_kwargs = {"task_id": self._last_task_id}
+            if archive_info:
+                record_kwargs["archive_relpath"] = archive_info.get("archive_relpath")
+                record_kwargs["archive_size"] = archive_info.get("archive_size")
+            self._history.record_start(self._last_filename, **record_kwargs)
             self._timelapse.start_capture(self._last_filename)
             self._pending_history_start = False
             log.info(f"Print start completed after filename arrived, filename={self._last_filename!r}")
@@ -283,12 +294,29 @@ class MqttQueue(Service):
     def request_status(self):
         self._send_status_query()
 
-    def mark_pending_print_start(self, filename=None, task_id=None):
+    def _claim_pending_archive_info(self, filename=None):
+        archive_info = getattr(self, "_pending_archive_info", None)
+        if not archive_info:
+            return None
+        expected_name = os.path.basename(str(archive_info.get("filename") or ""))
+        target_name = os.path.basename(str(filename or ""))
+        if expected_name and target_name and expected_name != target_name:
+            return None
+        self._pending_archive_info = None
+        return archive_info
+
+    def mark_pending_print_start(self, filename=None, task_id=None, archive_info=None):
         with self._state_lock:
             if filename:
                 self._last_filename = filename
             if task_id:
                 self._last_task_id = task_id
+            if archive_info and archive_info.get("archive_relpath"):
+                self._pending_archive_info = {
+                    "filename": filename,
+                    "archive_relpath": archive_info.get("archive_relpath"),
+                    "archive_size": archive_info.get("archive_size"),
+                }
             self._state = PrintState.PREPARING
             self._stop_requested = False
         log.info("Marked pending print start for %r", self._last_filename)

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from cli.model import Account, Config, Printer
 from web import app
+from web.service.history import PrintHistory
 
 
 API_KEY = "secret-key-123456"
@@ -63,7 +64,7 @@ def _base_config():
     )
 
 
-def _install_app_state(*, mqtt=None, videoqueue=None, config=None, login=True, video_supported=True, unsupported=False):
+def _install_app_state(*, mqtt=None, videoqueue=None, filetransfer=None, config=None, login=True, video_supported=True, unsupported=False):
     old_values = {
         "config": app.config.get("config"),
         "api_key": app.config.get("api_key"),
@@ -80,7 +81,7 @@ def _install_app_state(*, mqtt=None, videoqueue=None, config=None, login=True, v
     app.config["printer_index"] = 0
     app.config["video_supported"] = video_supported
     app.config["unsupported_device"] = unsupported
-    app.svc = FakeServices(mqttqueue=mqtt, videoqueue=videoqueue)
+    app.svc = FakeServices(mqttqueue=mqtt, videoqueue=videoqueue, filetransfer=filetransfer)
 
     return old_values, old_svc
 
@@ -405,6 +406,70 @@ def test_history_routes_require_auth_and_clear_entries():
     assert authorized.get_json()["total"] == 3
     assert cleared.status_code == 200
     assert calls == [("get", 500, 0), ("clear",)]
+
+
+def test_history_reprint_route_dispatches_archived_upload_and_validates_busy(tmp_path):
+    history = PrintHistory(db_path=tmp_path / "history.db")
+    archive_info = history.archive_upload("cube.gcode", b"G28\nM104 S200\n")
+    entry_id = history.record_start(
+        "cube.gcode",
+        archive_relpath=archive_info["archive_relpath"],
+        archive_size=archive_info["archive_size"],
+    )
+    history.record_finish(filename="cube.gcode")
+
+    upload_calls = []
+    mqtt = SimpleNamespace(
+        is_printing=False,
+        has_pending_print_start=False,
+        is_preparing_print=False,
+        history=history,
+    )
+    filetransfer = SimpleNamespace(
+        send_bytes=lambda *args, **kwargs: upload_calls.append((args, kwargs)),
+    )
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(mqtt=mqtt, filetransfer=filetransfer)
+
+    try:
+        ok = client.post(f"/api/history/{entry_id}/reprint", headers={"X-Api-Key": API_KEY})
+        missing = client.post("/api/history/99999/reprint", headers={"X-Api-Key": API_KEY})
+        mqtt.is_printing = True
+        busy = client.post(f"/api/history/{entry_id}/reprint", headers={"X-Api-Key": API_KEY})
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert ok.status_code == 200
+    assert ok.get_json()["name"] == "cube.gcode"
+    assert missing.status_code == 404
+    assert busy.status_code == 409
+    assert len(upload_calls) == 1
+    args, kwargs = upload_calls[0]
+    assert args[1] == "cube.gcode"
+    assert kwargs["start_print"] is True
+    assert kwargs["archive_info"]["archive_relpath"] == archive_info["archive_relpath"]
+
+
+def test_history_reprint_route_requires_archived_file(tmp_path):
+    history = PrintHistory(db_path=tmp_path / "history.db")
+    entry_id = history.record_start("usb-file.gcode")
+    history.record_finish(filename="usb-file.gcode")
+    mqtt = SimpleNamespace(
+        is_printing=False,
+        has_pending_print_start=False,
+        is_preparing_print=False,
+        history=history,
+    )
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(mqtt=mqtt, filetransfer=SimpleNamespace(send_bytes=lambda *args, **kwargs: None))
+
+    try:
+        response = client.post(f"/api/history/{entry_id}/reprint", headers={"X-Api-Key": API_KEY})
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert response.status_code == 404
+    assert "No archived GCode" in response.get_json()["error"]
 
 
 def test_timelapse_routes_list_download_delete_and_reject_traversal(tmp_path):
