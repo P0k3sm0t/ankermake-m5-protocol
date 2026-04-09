@@ -400,6 +400,58 @@ $(function () {
         return `X${speed / 50}`;
     }
 
+    function getFilamentStateLabel(value, progress, stepLen) {
+        const parsedValue = Number(value);
+        const parsedProgress = Number(progress);
+        const parsedStepLen = Number(stepLen);
+        const hasValue = Number.isFinite(parsedValue);
+        const hasProgress = Number.isFinite(parsedProgress);
+        const hasStepLen = Number.isFinite(parsedStepLen);
+
+        if ((hasProgress && parsedProgress > 0) || (hasStepLen && parsedStepLen > 0)) {
+            return "Changing";
+        }
+        if (hasValue && parsedValue === 0) {
+            return "Loaded";
+        }
+        if (!hasValue) {
+            return "Unknown";
+        }
+        return "Changing";
+    }
+
+    function isFilamentRunoutEvent(data) {
+        if (!data || typeof data !== "object") {
+            return false;
+        }
+        if (data.commandType === 1085 && String(data.errorCode || "") === "0xFF01030001") {
+            return true;
+        }
+        return data.commandType === 1000
+            && Number(data.subType) === 2
+            && Number(data.value) === 6;
+    }
+
+    function setFilamentState(label) {
+        const el = $("#filament-state");
+        if (!el.length) {
+            return;
+        }
+
+        const value = String(label || "Unknown");
+        el.text(value);
+        el.removeClass("text-success text-warning text-danger text-muted");
+        if (value === "Loaded") {
+            el.addClass("text-success");
+        } else if (value === "Not Loaded") {
+            el.addClass("text-danger");
+        } else if (value === "Changing") {
+            el.addClass("text-warning");
+        } else {
+            el.addClass("text-muted");
+        }
+    }
+
     /**
      * Highlight active video profile button.
      * @param {string} profileId
@@ -743,6 +795,10 @@ $(function () {
                 }
             } else if (data.commandType == 1021) {
                 applyZOffsetState(data, { populateTarget: false });
+            } else if (isFilamentRunoutEvent(data)) {
+                setFilamentState("Not Loaded");
+            } else if (data.commandType == 1023) {
+                setFilamentState(getFilamentStateLabel(data.value, data.progress, data.stepLen));
             } else if (data.commandType == 1044) {
                 // Print start notification — extract basename from filePath
                 const filePath = data.filePath || "";
@@ -770,6 +826,7 @@ $(function () {
             $("#set-bed-temp").val(0);
             $("#print-speed").text("0mm/s");
             $("#print-layer").text("0 / 0");
+            setFilamentState("Unknown");
             document.title = "ankerctl";
             _updatePrintControlButtons(PRINT_STATE.IDLE);
             _zOffsetCurrentMm = null;

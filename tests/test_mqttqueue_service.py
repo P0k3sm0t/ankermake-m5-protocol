@@ -37,6 +37,10 @@ def _queue():
     queue._nozzle_temp_target = None
     queue._bed_temp = None
     queue._bed_temp_target = None
+    queue._filament_state = "unknown"
+    queue._filament_change_value = None
+    queue._filament_change_progress = None
+    queue._filament_change_step_len = None
     queue._control_username = "tester@example.com"
     queue._control_user_id = "user-123"
     queue._debug_log_payloads = False
@@ -79,6 +83,76 @@ def test_forward_to_ha_keeps_local_temperature_state_when_ha_is_disabled():
     assert queue._bed_temp == 65
     assert queue._bed_temp_target == 70
     assert ha_updates == []
+
+
+def test_forward_to_ha_tracks_filament_state_from_material_change_mode():
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+
+    queue._forward_to_ha({"commandType": 1023, "value": 0, "progress": 0, "stepLen": 0})
+    state = queue.get_state()["filament"]
+
+    assert state["state"] == "loaded"
+    assert state["label"] == "Loaded"
+    assert state["loaded"] is True
+    assert state["raw_value"] == 0
+    assert state["progress"] == 0
+    assert state["step_len"] == 0
+
+
+def test_handle_notification_tracks_filament_changing_state():
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+
+    queue._handle_notification({"commandType": 1023, "value": 1, "progress": 25, "stepLen": 40})
+    state = queue.get_state()["filament"]
+
+    assert state["state"] == "changing"
+    assert state["label"] == "Changing"
+    assert state["loaded"] is None
+    assert state["raw_value"] == 1
+    assert state["progress"] == 25
+    assert state["step_len"] == 40
+
+
+def test_handle_notification_tracks_filament_runout_alarm_state():
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+
+    queue._handle_notification({
+        "commandType": 1085,
+        "errorCode": "0xFF01030001",
+        "errorLevel": "P1",
+    })
+    state = queue.get_state()["filament"]
+
+    assert state["state"] == "not_loaded"
+    assert state["label"] == "Not Loaded"
+    assert state["loaded"] is None
+
+
+def test_event_notify_filament_break_sets_not_loaded_until_change_cycle_completes():
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+
+    queue._handle_notification({
+        "commandType": 1000,
+        "subType": 2,
+        "value": 6,
+    })
+    assert queue.get_state()["filament"]["state"] == "not_loaded"
+
+    queue._handle_notification({"commandType": 1023, "value": 2, "progress": 50, "stepLen": 20})
+    assert queue.get_state()["filament"]["state"] == "changing"
+
+    queue._handle_notification({"commandType": 1023, "value": 0, "progress": 100, "stepLen": 20})
+    state = queue.get_state()["filament"]
+    assert state["state"] == "loaded"
+    assert state["label"] == "Loaded"
 
 
 def test_emit_progress_respects_bucket_interval():

@@ -53,6 +53,15 @@ MQTT_PRINT_STATE_LABELS = {
     8: "preparing_or_aborted",
 }
 
+FILAMENT_STATE_LABELS = {
+    "unknown": "Unknown",
+    "loaded": "Loaded",
+    "changing": "Changing",
+    "not_loaded": "Not Loaded",
+}
+
+FILAMENT_RUNOUT_ERROR_CODE = "0xFF01030001"
+
 G28_DEDUPE_WINDOW_SEC = 10.0
 STORED_FILE_SELECTION_TIMEOUT_SEC = 2.0
 STORED_FILE_START_CONFIRM_TIMEOUT_SEC = 12.0
@@ -120,6 +129,10 @@ class MqttQueue(Service):
         self._z_offset_updated_at = 0.0
         self._z_offset_seq = 0
         self._z_offset_cond = threading.Condition()
+        self._filament_state = "unknown"
+        self._filament_change_value = None
+        self._filament_change_progress = None
+        self._filament_change_step_len = None
         self._stored_file_selection_cond = threading.Condition(self._state_lock)
         self._stored_file_preview_request_lock = threading.Lock()
         self._stored_file_preview_cache = {}
@@ -810,6 +823,58 @@ class MqttQueue(Service):
                 return value.strip().lower()
         return None
 
+    @staticmethod
+    def _normalize_filament_state(payload):
+        if not isinstance(payload, dict):
+            return "unknown"
+
+        value = MqttQueue._safe_int(payload.get("value"))
+        progress = MqttQueue._safe_int(payload.get("progress"))
+        if "stepLen" in payload:
+            step_len_raw = payload.get("stepLen")
+        else:
+            step_len_raw = payload.get("step_len")
+        step_len = MqttQueue._safe_int(step_len_raw)
+
+        if value == 0:
+            return "loaded"
+        # Firmware exposes filament change mode more clearly than a strict
+        # "filament present" sensor. Treat any active movement/progress as
+        # a changing state, and the idle 0/0/0 mode as loaded/ready.
+        if (progress is not None and progress > 0) or (step_len is not None and step_len > 0):
+            return "changing"
+        if value is None:
+            return "unknown"
+        return "changing"
+
+    def _update_filament_state(self, payload):
+        if not isinstance(payload, dict):
+            return
+        command_type = payload.get("commandType")
+
+        if command_type == MqttMsgType.ZZ_MQTT_CMD_ENTER_OR_QUIT_MATERIEL:
+            self._filament_change_value = self._safe_int(payload.get("value"))
+            self._filament_change_progress = self._safe_int(payload.get("progress"))
+            if "stepLen" in payload:
+                step_len_raw = payload.get("stepLen")
+            else:
+                step_len_raw = payload.get("step_len")
+            self._filament_change_step_len = self._safe_int(step_len_raw)
+            self._filament_state = self._normalize_filament_state(payload)
+            return
+
+        if command_type == 1085 and str(payload.get("errorCode") or "") == FILAMENT_RUNOUT_ERROR_CODE:
+            self._filament_state = "not_loaded"
+            return
+
+        if (
+            command_type == MqttMsgType.ZZ_MQTT_CMD_EVENT_NOTIFY
+            and self._safe_int(payload.get("subType")) == 2
+            and self._safe_int(payload.get("value")) == 6
+        ):
+            self._filament_state = "not_loaded"
+            return
+
     def _forward_to_ha(self, payload):
         """Update cached MQTT state and forward relevant data to Home Assistant."""
         if not isinstance(payload, dict):
@@ -817,6 +882,8 @@ class MqttQueue(Service):
 
         command_type = payload.get("commandType")
         ha_updates = {}
+
+        self._update_filament_state(payload)
 
         # Nozzle temperature (command 1003 = 0x03eb)
         if command_type == MqttMsgType.ZZ_MQTT_CMD_NOZZLE_TEMP:
@@ -893,6 +960,7 @@ class MqttQueue(Service):
             return
 
         command_type = payload.get("commandType")
+        self._update_filament_state(payload)
         preview_url = self._extract_preview_url(payload)
         if preview_url:
             self._preview_url = preview_url
@@ -1196,6 +1264,14 @@ class MqttQueue(Service):
                 "bed_target": self._bed_temp_target,
             },
             "z_offset": self.get_z_offset_state(),
+            "filament": {
+                "state": getattr(self, "_filament_state", "unknown"),
+                "label": FILAMENT_STATE_LABELS.get(getattr(self, "_filament_state", "unknown"), "Unknown"),
+                "loaded": True if getattr(self, "_filament_state", "unknown") == "loaded" else None,
+                "raw_value": getattr(self, "_filament_change_value", None),
+                "progress": getattr(self, "_filament_change_progress", None),
+                "step_len": getattr(self, "_filament_change_step_len", None),
+            },
             "debug_logging": getattr(self, "_debug_log_payloads", False),
             "timelapse": {
                 "enabled": getattr(self._timelapse, "enabled", None),
