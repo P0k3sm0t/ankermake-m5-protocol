@@ -35,6 +35,7 @@ import secrets
 import shutil
 import threading
 import time
+from collections import deque
 from contextlib import contextmanager
 
 log = logging.getLogger("web")
@@ -50,6 +51,96 @@ def _configure_access_log_noise():
     werkzeug_log = logging.getLogger("werkzeug")
     if not any(isinstance(f, _StaticAssetAccessLogFilter) for f in werkzeug_log.filters):
         werkzeug_log.addFilter(_StaticAssetAccessLogFilter())
+
+
+class _ConsoleLogBuffer:
+    def __init__(self, max_lines=2000):
+        self._entries = deque(maxlen=max_lines)
+        self._next_id = 1
+        self._lock = threading.Lock()
+
+    @property
+    def max_lines(self):
+        return self._entries.maxlen or 0
+
+    def append(self, text):
+        text = str(text or "").rstrip("\r\n")
+        if not text:
+            return None
+        with self._lock:
+            entry = {"id": self._next_id, "text": text}
+            self._entries.append(entry)
+            self._next_id += 1
+            return entry["id"]
+
+    def snapshot(self, *, limit=200, after_id=None):
+        limit = max(1, min(int(limit), self.max_lines or 1))
+        with self._lock:
+            entries = list(self._entries)
+
+        first_id = entries[0]["id"] if entries else 0
+        last_id = entries[-1]["id"] if entries else 0
+        truncated = False
+
+        if after_id is None:
+            selected = entries[-limit:]
+        else:
+            try:
+                after_id = int(after_id)
+            except (TypeError, ValueError):
+                after_id = 0
+
+            if entries and after_id < first_id - 1:
+                truncated = True
+
+            selected = [entry for entry in entries if entry["id"] > after_id]
+            if len(selected) > limit:
+                truncated = True
+                selected = selected[-limit:]
+
+        return {
+            "entries": [dict(entry) for entry in selected],
+            "first_id": first_id,
+            "last_id": last_id,
+            "next_after": last_id,
+            "truncated": truncated,
+            "max_lines": self.max_lines,
+        }
+
+
+class _ConsoleLogFormatter(logging.Formatter):
+    _MARKS = {
+        logging.CRITICAL: "!",
+        logging.ERROR: "E",
+        logging.WARNING: "W",
+        logging.INFO: "*",
+        logging.DEBUG: "D",
+    }
+
+    def format(self, record):
+        message = record.getMessage()
+        if record.exc_info:
+            message = f"{message}\n{self.formatException(record.exc_info)}"
+        if record.stack_info:
+            message = f"{message}\n{self.formatStack(record.stack_info)}"
+        mark = self._MARKS.get(record.levelno, "*")
+        lines = str(message or "").splitlines() or [""]
+        return "\n".join(([f"[{mark}] {lines[0]}"] + lines[1:]))
+
+
+class _ConsoleLogBufferHandler(logging.Handler):
+    def __init__(self, buffer):
+        super().__init__(level=logging.DEBUG)
+        self.buffer = buffer
+        self._ankerctl_console_buffer_handler = True
+
+    def emit(self, record):
+        try:
+            formatted = self.format(record)
+            for line in str(formatted).splitlines():
+                self.buffer.append(line)
+        except Exception:
+            self.handleError(record)
 
 
 from secrets import token_urlsafe as token
@@ -179,6 +270,30 @@ def _configure_request_limits(flask_app, env=None):
 
 
 _configure_request_limits(app)
+
+
+def _get_console_log_buffer():
+    buffer = getattr(app, "console_log_buffer", None)
+    if buffer is None:
+        max_lines = _env_int("ANKERCTL_CONSOLE_BUFFER_LINES", 2000, min_value=100)
+        buffer = _ConsoleLogBuffer(max_lines=max_lines)
+        app.console_log_buffer = buffer
+
+    root = logging.getLogger()
+    for handler in root.handlers:
+        if getattr(handler, "_ankerctl_console_buffer_handler", False):
+            if getattr(handler, "buffer", None) is not buffer:
+                buffer = handler.buffer
+                app.console_log_buffer = buffer
+            return buffer
+
+    if not root.handlers:
+        return buffer
+
+    handler = _ConsoleLogBufferHandler(buffer)
+    handler.setFormatter(_ConsoleLogFormatter())
+    root.addHandler(handler)
+    return buffer
 
 # Session cookie security
 app.config['SESSION_COOKIE_SAMESITE'] = 'Strict'
@@ -2856,6 +2971,14 @@ def register_services(app):
         svc.start()
 
 
+@app.get("/api/console/logs")
+def app_api_console_logs():
+    buffer = _get_console_log_buffer()
+    limit = max(1, min(request.args.get("limit", 200, type=int), 1000))
+    after_id = request.args.get("after", default=None, type=int)
+    return buffer.snapshot(limit=limit, after_id=after_id)
+
+
 def webserver(config, printer_index, host, port, insecure=False, **kwargs):
     """
     Starts the Flask webserver
@@ -2869,6 +2992,8 @@ def webserver(config, printer_index, host, port, insecure=False, **kwargs):
     Returns:
         - None
     """
+    _get_console_log_buffer()
+
     # Filament profile store — initialized once at startup
     config_root = config.config_root
     app.filaments = FilamentStore(db_path=str(config_root / "filament.db"))
@@ -3086,6 +3211,7 @@ def add_security_headers(response):
 # and therefore require auth even though they are GET requests.
 _PROTECTED_GET_PATHS = {
     "/api/ankerctl/server/reload",
+    "/api/console/logs",
     "/api/debug/state",
     "/api/debug/logs",
     "/api/debug/services",

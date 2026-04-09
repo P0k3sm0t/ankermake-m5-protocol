@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from cli.model import Account, Config, Printer
 from libflagship import resolve_root_dir
+from web import _ConsoleLogBuffer
 from web import (
     _build_command_group,
     _build_filament_move_gcode,
@@ -25,6 +26,7 @@ from web import (
     _z_offset_steps_to_mm,
     app,
 )
+import web as web_module
 from web.util import flash_redirect
 
 
@@ -200,6 +202,56 @@ def test_api_health_and_version_routes():
     finally:
         app.config["login"] = old_login
         app.config["api_key"] = old_api_key
+
+
+def test_console_log_buffer_supports_recent_tail_and_incremental_updates():
+    buffer = _ConsoleLogBuffer(max_lines=3)
+    for idx in range(1, 6):
+        buffer.append(f"line {idx}")
+
+    recent = buffer.snapshot(limit=10)
+    incremental = buffer.snapshot(after_id=3, limit=10)
+    truncated = buffer.snapshot(after_id=1, limit=10)
+
+    assert [entry["text"] for entry in recent["entries"]] == ["line 3", "line 4", "line 5"]
+    assert recent["first_id"] == 3
+    assert recent["last_id"] == 5
+    assert [entry["text"] for entry in incremental["entries"]] == ["line 4", "line 5"]
+    assert incremental["truncated"] is False
+    assert truncated["truncated"] is True
+
+
+def test_api_console_logs_returns_recent_entries(monkeypatch):
+    calls = []
+
+    class FakeConsoleBuffer:
+        def snapshot(self, *, limit=200, after_id=None):
+            calls.append((limit, after_id))
+            return {
+                "entries": [{"id": 42, "text": "[*] printer ready"}],
+                "first_id": 40,
+                "last_id": 42,
+                "next_after": 42,
+                "truncated": False,
+                "max_lines": 2000,
+            }
+
+    client = app.test_client()
+    old_login = app.config.get("login")
+    old_api_key = app.config.get("api_key")
+    monkeypatch.setattr(web_module, "_get_console_log_buffer", lambda: FakeConsoleBuffer())
+    app.config["login"] = True
+    app.config["api_key"] = None
+
+    try:
+        response = client.get("/api/console/logs?limit=25&after=10")
+    finally:
+        app.config["login"] = old_login
+        app.config["api_key"] = old_api_key
+
+    assert response.status_code == 200
+    assert response.get_json()["entries"] == [{"id": 42, "text": "[*] printer ready"}]
+    assert calls == [(25, 10)]
 
 
 def test_api_printers_and_switch_active_printer(monkeypatch):

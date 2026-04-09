@@ -157,6 +157,120 @@ $(function () {
         return div.innerHTML;
     }
 
+    const HOME_CONSOLE_INITIAL_LIMIT = 200;
+    const HOME_CONSOLE_MAX_LINES = 400;
+    const HOME_CONSOLE_POLL_MS = 2000;
+
+    let _homeConsoleEntries = [];
+    let _homeConsoleLastId = 0;
+    let _homeConsoleLoading = false;
+    let _homeConsoleInterval = null;
+
+    function setHomeConsoleStatus(message) {
+        const status = $("#home-console-status");
+        if (status.length) {
+            status.text(message);
+        }
+    }
+
+    function renderHomeConsoleEntries(entries, replace = false) {
+        const pre = document.getElementById("home-console-pre");
+        const content = document.getElementById("home-console-content");
+        if (!content) {
+            return;
+        }
+
+        const wasNearBottom = !pre
+            || (pre.scrollHeight - pre.scrollTop - pre.clientHeight) < 40;
+
+        if (replace) {
+            _homeConsoleEntries = Array.isArray(entries) ? entries.slice(-HOME_CONSOLE_MAX_LINES) : [];
+        } else if (Array.isArray(entries) && entries.length) {
+            _homeConsoleEntries = _homeConsoleEntries.concat(entries).slice(-HOME_CONSOLE_MAX_LINES);
+        }
+
+        if (!_homeConsoleEntries.length) {
+            content.innerHTML = "No console output captured yet.";
+        } else {
+            content.innerHTML = _homeConsoleEntries
+                .map(entry => escapeHtml(entry && entry.text ? entry.text : ""))
+                .join("\n");
+        }
+
+        setHomeConsoleStatus(`Showing ${_homeConsoleEntries.length} line(s) - live updates every 2s`);
+
+        if (pre && wasNearBottom) {
+            pre.scrollTop = pre.scrollHeight;
+        }
+    }
+
+    async function fetchHomeConsoleLogs(afterId = null, limit = HOME_CONSOLE_INITIAL_LIMIT) {
+        const params = new URLSearchParams({ limit: String(limit) });
+        if (afterId !== null && afterId !== undefined) {
+            params.set("after", String(afterId));
+        }
+        const resp = await fetch(`/api/console/logs?${params.toString()}`);
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+            throw new Error(data.error || `HTTP ${resp.status}`);
+        }
+        return data;
+    }
+
+    async function loadHomeConsoleHistory() {
+        if (_homeConsoleLoading) {
+            return;
+        }
+        _homeConsoleLoading = true;
+        try {
+            const data = await fetchHomeConsoleLogs(null, HOME_CONSOLE_INITIAL_LIMIT);
+            renderHomeConsoleEntries(data.entries || [], true);
+            _homeConsoleLastId = data.last_id || 0;
+        } catch (err) {
+            setHomeConsoleStatus(`Console viewer error: ${err.message}`);
+        } finally {
+            _homeConsoleLoading = false;
+        }
+    }
+
+    async function pollHomeConsoleUpdates() {
+        if (_homeConsoleLoading) {
+            return;
+        }
+        _homeConsoleLoading = true;
+        try {
+            const data = await fetchHomeConsoleLogs(_homeConsoleLastId, HOME_CONSOLE_INITIAL_LIMIT);
+            if (data.truncated) {
+                renderHomeConsoleEntries(data.entries || [], true);
+            } else if (Array.isArray(data.entries) && data.entries.length) {
+                renderHomeConsoleEntries(data.entries, false);
+            }
+            _homeConsoleLastId = data.last_id || _homeConsoleLastId;
+        } catch (err) {
+            setHomeConsoleStatus(`Console viewer error: ${err.message}`);
+        } finally {
+            _homeConsoleLoading = false;
+        }
+    }
+
+    function startHomeConsoleViewer() {
+        if (!document.getElementById("home-console-content")) {
+            return;
+        }
+        loadHomeConsoleHistory();
+        if (_homeConsoleInterval) {
+            return;
+        }
+        _homeConsoleInterval = setInterval(pollHomeConsoleUpdates, HOME_CONSOLE_POLL_MS);
+    }
+
+    function stopHomeConsoleViewer() {
+        if (_homeConsoleInterval) {
+            clearInterval(_homeConsoleInterval);
+            _homeConsoleInterval = null;
+        }
+    }
+
     /**
      * Calculates the AnkerMake M5 Speed ratio ("X-factor")
      * @param {number} speed - The speed value in mm/s
@@ -2392,6 +2506,21 @@ $(function () {
             setGCodeStorageBusy(false);
         }
     });
+
+    const homeTabBtn = document.querySelector('button[data-bs-target="#home"]');
+    if (homeTabBtn) {
+        homeTabBtn.addEventListener("shown.bs.tab", function () {
+            startHomeConsoleViewer();
+        });
+        homeTabBtn.addEventListener("hidden.bs.tab", function () {
+            stopHomeConsoleViewer();
+        });
+    }
+
+    const homeTabPane = document.getElementById("home");
+    if (homeTabPane && homeTabPane.classList.contains("show")) {
+        startHomeConsoleViewer();
+    }
 
     const gcodeTabBtn = document.querySelector('button[data-bs-target="#gcode"]');
     if (gcodeTabBtn) {
