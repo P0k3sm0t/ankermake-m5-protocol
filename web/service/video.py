@@ -7,6 +7,7 @@ from queue import Empty
 _STALL_TIMEOUT = 5.0  # seconds without a frame before soft restart; 3 failures → ServiceRestartSignal
 _STALL_MAX_RETRIES = 3  # escalate to hard restart after this many consecutive soft-reset failures
 _LIVE_REFRESH_COOLDOWN = 4.0
+_EXTERNAL_RECOVERY_COOLDOWN = 3.0
 
 log = logging.getLogger(__name__)
 
@@ -68,6 +69,10 @@ class VideoQueue(Service):
         self._pending_disable = False
         self._in_place_recovery = False
         self._pppp_recycle_requested_at = None
+        self._manual_recovery_requested = False
+        self._manual_recovery_reason = None
+        self._manual_recovery_force_pppp = False
+        self._manual_recovery_requested_at = 0.0
         super().__init__()
 
     def api_start_live(self):
@@ -281,6 +286,63 @@ class VideoQueue(Service):
         self._pending_disable = False
         self._in_place_recovery = False
         self._pppp_recycle_requested_at = None
+        self._manual_recovery_requested = False
+        self._manual_recovery_reason = None
+        self._manual_recovery_force_pppp = False
+        self._manual_recovery_requested_at = 0.0
+
+    def request_live_recovery(self, reason="manual recovery", force_pppp_recycle=False):
+        """Ask the worker thread to refresh the live stream for a stalled client."""
+        if not self.video_enabled:
+            log.debug("VideoQueue: ignoring live recovery request because video is disabled")
+            return False
+
+        now = time.monotonic()
+        if (
+            getattr(self, "_manual_recovery_requested", False)
+            and (now - getattr(self, "_manual_recovery_requested_at", 0.0)) < _EXTERNAL_RECOVERY_COOLDOWN
+        ):
+            return False
+
+        self._manual_recovery_requested = True
+        self._manual_recovery_reason = str(reason or "manual recovery").strip() or "manual recovery"
+        self._manual_recovery_force_pppp = bool(force_pppp_recycle)
+        self._manual_recovery_requested_at = now
+
+        if self.state == RunState.Stopped and not self.wanted:
+            self.start()
+        else:
+            self._event.set()
+        return True
+
+    def _handle_requested_recovery(self, pppp):
+        if not getattr(self, "_manual_recovery_requested", False):
+            return False
+
+        reason = getattr(self, "_manual_recovery_reason", None) or "manual recovery"
+        force_pppp_recycle = bool(getattr(self, "_manual_recovery_force_pppp", False))
+        self._manual_recovery_requested = False
+        self._manual_recovery_reason = None
+        self._manual_recovery_force_pppp = False
+
+        if (
+            force_pppp_recycle
+            or pppp is None
+            or not getattr(pppp, "connected", False)
+            or not hasattr(pppp, "_api")
+            or getattr(self, "api_id", None) is None
+        ):
+            log.warning(f"VideoQueue: {reason}; recycling PPPP in place")
+            self._recycle_pppp_in_place()
+            return True
+
+        self._attempt_stall_recovery(
+            pppp,
+            f"VideoQueue: {reason}; refreshing live stream",
+            f"VideoQueue: failed recovery request ({reason})",
+            f"Video recovery request exhausted ({reason})",
+        )
+        return True
 
     def _recycle_pppp_in_place(self):
         """Recycle the PPPP session without restarting the VideoQueue service.
@@ -377,6 +439,9 @@ class VideoQueue(Service):
 
         if not self.pppp:
             self.pppp = self._ensure_pppp_ready()
+            if self._handle_requested_recovery(self.pppp):
+                time.sleep(0.1)
+                return
             if not self.pppp:
                 log.debug("VideoQueue: PPPP not available yet")
                 time.sleep(0.5)
@@ -387,6 +452,10 @@ class VideoQueue(Service):
         pppp = self.pppp
         if pppp is None:
             raise ServiceRestartSignal("PPPP reference lost during video session")
+
+        if self._handle_requested_recovery(pppp):
+            time.sleep(0.1)
+            return
 
         if not getattr(pppp, "connected", False):
             log.debug("VideoQueue: PPPP exists but is not connected yet")

@@ -46,6 +46,8 @@ class _AccessLogNoiseFilter(logging.Filter):
         '"GET /static/',
         '"GET /favicon.ico',
         '"GET /api/console/logs',
+        '"GET /api/printer/alerts',
+        '"GET /api/printer/runtime-state',
     )
 
     def filter(self, record):
@@ -147,6 +149,99 @@ class _ConsoleLogBufferHandler(logging.Handler):
                 self.buffer.append(line)
         except Exception:
             self.handleError(record)
+
+
+class _PrinterAlertBuffer:
+    def __init__(self, max_entries=100):
+        self._entries = deque(maxlen=max_entries)
+        self._next_id = 1
+        self._recent_keys = {}
+        self._lock = threading.Lock()
+
+    @property
+    def max_entries(self):
+        return self._entries.maxlen or 0
+
+    def append(
+        self,
+        *,
+        printer_index,
+        printer_name,
+        alert_type,
+        title,
+        message,
+        level="warning",
+        cooldown_sec=30,
+    ):
+        message = str(message or "").strip()
+        if not message:
+            return None
+
+        title = str(title or "").strip() or message
+        level = str(level or "warning").strip() or "warning"
+        alert_key = f"{printer_index}:{alert_type}:{title}:{message}"
+        now = time.monotonic()
+
+        with self._lock:
+            if cooldown_sec:
+                last_seen = self._recent_keys.get(alert_key)
+                if last_seen is not None and now - last_seen < float(cooldown_sec):
+                    return None
+            self._recent_keys[alert_key] = now
+            stale_before = now - max(float(cooldown_sec or 0) * 4, 60.0)
+            self._recent_keys = {
+                key: seen_at
+                for key, seen_at in self._recent_keys.items()
+                if seen_at >= stale_before
+            }
+
+            entry = {
+                "id": self._next_id,
+                "created_at": time.time(),
+                "printer_index": printer_index,
+                "printer_name": printer_name,
+                "type": alert_type,
+                "title": title,
+                "message": message,
+                "level": level,
+            }
+            self._entries.append(entry)
+            self._next_id += 1
+            return entry["id"]
+
+    def snapshot(self, *, limit=50, after_id=None):
+        limit = max(1, min(int(limit), self.max_entries or 1))
+        with self._lock:
+            entries = list(self._entries)
+
+        first_id = entries[0]["id"] if entries else 0
+        last_id = entries[-1]["id"] if entries else 0
+        truncated = False
+
+        if after_id is None:
+            selected = entries[-limit:]
+        else:
+            try:
+                after_id = int(after_id)
+            except (TypeError, ValueError):
+                after_id = 0
+
+            if entries and after_id < first_id - 1:
+                truncated = True
+
+            selected = [entry for entry in entries if entry["id"] > after_id]
+            if len(selected) > limit:
+                truncated = True
+                selected = selected[-limit:]
+
+        return {
+            "entries": [dict(entry) for entry in selected],
+            "first_id": first_id,
+            "last_id": last_id,
+            "next_after": last_id,
+            "truncated": truncated,
+            "max_entries": self.max_entries,
+        }
 
 
 from secrets import token_urlsafe as token
@@ -301,9 +396,41 @@ def _get_console_log_buffer():
     root.addHandler(handler)
     return buffer
 
+
+def _get_printer_alert_buffer():
+    buffer = getattr(app, "printer_alert_buffer", None)
+    if buffer is None:
+        max_entries = _env_int("ANKERCTL_PRINTER_ALERT_BUFFER_SIZE", 100, min_value=10)
+        buffer = _PrinterAlertBuffer(max_entries=max_entries)
+        app.printer_alert_buffer = buffer
+    return buffer
+
+
+def _record_printer_alert(
+    *,
+    printer_index,
+    printer_name,
+    alert_type,
+    title,
+    message,
+    level="warning",
+    cooldown_sec=30,
+):
+    buffer = _get_printer_alert_buffer()
+    return buffer.append(
+        printer_index=printer_index,
+        printer_name=printer_name,
+        alert_type=alert_type,
+        title=title,
+        message=message,
+        level=level,
+        cooldown_sec=cooldown_sec,
+    )
+
 # Session cookie security
 app.config['SESSION_COOKIE_SAMESITE'] = 'Strict'
 app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.record_printer_alert = _record_printer_alert
 
 # Resolve log directory once: honour env var, fall back to None on bare metal
 _log_dir = os.getenv("ANKERCTL_LOG_DIR") or ("/logs" if os.path.isdir("/logs") else None)
@@ -2482,6 +2609,14 @@ def app_api_printer_runtime_state():
             return {"error": "Service unavailable"}, 503
         state = mqtt.get_state()
     return {"status": "ok", **state}
+
+
+@app.get("/api/printer/alerts")
+def app_api_printer_alerts():
+    buffer = _get_printer_alert_buffer()
+    limit = request.args.get("limit", 20, type=int)
+    after = request.args.get("after", None, type=int)
+    return buffer.snapshot(limit=limit, after_id=after)
 
 
 @app.get("/api/printer/bed-leveling/last")

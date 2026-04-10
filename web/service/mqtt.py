@@ -69,6 +69,7 @@ PAUSE_REASON_LABELS = {
 }
 
 FILAMENT_RUNOUT_ERROR_CODE = "0xFF01030001"
+FILAMENT_RUNOUT_CONFIRM_WINDOW_SEC = 8.0
 
 G28_DEDUPE_WINDOW_SEC = 10.0
 STORED_FILE_SELECTION_TIMEOUT_SEC = 2.0
@@ -126,6 +127,8 @@ class MqttQueue(Service):
                 printer_name = getattr(printer, "name", None) or "AnkerMake M5"
         self._ha = HomeAssistantService(app.config["config"], printer_sn=printer_sn, printer_name=printer_name)
         self._ha.start()
+        self._printer_name = printer_name or "AnkerMake M5"
+        self._printer_sn = printer_sn
 
         self._reset_print_state()
         self._gcode_layer_count = None  # Override from GCode header, survives print resets
@@ -145,6 +148,8 @@ class MqttQueue(Service):
         self._filament_issue = None
         self._filament_issue_code = None
         self._pause_reason = None
+        self._filament_runout_pending = False
+        self._filament_runout_pending_at = 0.0
         self._stored_file_selection_cond = threading.Condition(self._state_lock)
         self._stored_file_preview_request_lock = threading.Lock()
         self._stored_file_preview_cache = {}
@@ -194,6 +199,10 @@ class MqttQueue(Service):
         self._last_print_schedule_filename = None
         self._last_print_schedule_seen_at = 0.0
         self._pause_reason = None
+        self._filament_runout_pending = False
+        self._filament_runout_pending_at = 0.0
+        if hasattr(self, "_timelapse"):
+            self._sync_timelapse_capture_pause()
         # Preserve debug setting across resets if possible, but init here if missing
         if not hasattr(self, "_debug_log_payloads"):
              self._debug_log_payloads = False
@@ -211,6 +220,22 @@ class MqttQueue(Service):
         self._failure_sent = True
         self._state = PrintState.FAILED
 
+    def _sync_timelapse_capture_pause(self):
+        set_capture_paused = getattr(self._timelapse, "set_capture_paused", None)
+        if not callable(set_capture_paused):
+            return
+
+        reason = None
+        if (
+            getattr(self, "_filament_issue", None) == "runout"
+            or getattr(self, "_pause_reason", None) == "filament_runout"
+        ):
+            reason = "filament_runout"
+        elif getattr(self, "_filament_state", None) == "changing":
+            reason = "filament_change"
+
+        set_capture_paused(reason is not None, reason=reason)
+
     @staticmethod
     def _print_state_value_label(value):
         return MQTT_PRINT_STATE_LABELS.get(value, f"unknown_{value}")
@@ -219,9 +244,16 @@ class MqttQueue(Service):
         if self._state != PrintState.PAUSED:
             return False
 
+        if getattr(self, "_pause_reason", None) == "filament_runout":
+            self._filament_issue = None
+            self._filament_issue_code = None
+            if getattr(self, "_filament_state", "unknown") in ("unknown", "not_loaded", "changing"):
+                self._filament_state = "loaded"
+
         self._state = PrintState.PRINTING
         self._pause_reason = None
         self._ha.update_state(print_status="printing")
+        self._sync_timelapse_capture_pause()
         return True
 
     def _transition_to_active(self, payload, progress, filename=None):
@@ -911,10 +943,58 @@ class MqttQueue(Service):
 
         if issue == "runout":
             if self._state == PrintState.PAUSED:
-                return "Printer paused for filament reload."
+                return "Paused: Filament runout. Reload filament to continue."
             return "Filament runout or break detected."
 
         return None
+
+    def _clear_filament_runout_pending(self):
+        self._filament_runout_pending = False
+        self._filament_runout_pending_at = 0.0
+
+    def _mark_filament_runout_pending(self):
+        self._filament_runout_pending = True
+        self._filament_runout_pending_at = time.monotonic()
+
+    def _has_recent_filament_runout_pending(self):
+        if not getattr(self, "_filament_runout_pending", False):
+            return False
+        pending_at = getattr(self, "_filament_runout_pending_at", 0.0)
+        if not pending_at:
+            return False
+        return (time.monotonic() - pending_at) <= FILAMENT_RUNOUT_CONFIRM_WINDOW_SEC
+
+    def _record_printer_alert(self, *, alert_type, title, message, level="warning", cooldown_sec=30):
+        record = getattr(app, "record_printer_alert", None)
+        if callable(record):
+            return record(
+                printer_index=self.printer_index,
+                printer_name=getattr(self, "_printer_name", f"Printer {self.printer_index + 1}"),
+                alert_type=alert_type,
+                title=title,
+                message=message,
+                level=level,
+                cooldown_sec=cooldown_sec,
+            )
+        return None
+
+    def _mark_filament_runout(self):
+        newly_detected = getattr(self, "_filament_issue", None) != "runout"
+        self._clear_filament_runout_pending()
+        self._filament_state = "not_loaded"
+        self._filament_issue = "runout"
+        self._filament_issue_code = FILAMENT_RUNOUT_ERROR_CODE
+        if self._state in (PrintState.PRE_PRINT, PrintState.PRINTING, PrintState.PAUSED):
+            self._pause_reason = "filament_runout"
+        if newly_detected:
+            self._record_printer_alert(
+                alert_type="filament_runout",
+                title="Filament runout",
+                message="Filament runout or break detected.",
+                level="warning",
+                cooldown_sec=45,
+            )
+        return newly_detected
 
     def _update_filament_state(self, payload):
         if not isinstance(payload, dict):
@@ -929,18 +1009,37 @@ class MqttQueue(Service):
             else:
                 step_len_raw = payload.get("step_len")
             self._filament_change_step_len = self._safe_int(step_len_raw)
-            self._filament_state = self._normalize_filament_state(payload)
-            if self._filament_state in ("changing", "loaded"):
+            normalized_state = self._normalize_filament_state(payload)
+            in_filament_runout_pause = (
+                self._state == PrintState.PAUSED
+                and getattr(self, "_pause_reason", None) == "filament_runout"
+                and getattr(self, "_filament_issue", None) == "runout"
+            )
+
+            if in_filament_runout_pause and normalized_state == "loaded":
+                # The firmware can emit a transient value=0 between unload/reload
+                # stages during a runout recovery. Keep the UI conservative until
+                # the print actually resumes.
+                self._filament_state = "not_loaded"
+            else:
+                self._filament_state = normalized_state
+
+            if getattr(self, "_filament_issue", None) != "runout" and self._filament_state in ("changing", "loaded"):
+                self._clear_filament_runout_pending()
+            if not in_filament_runout_pause and self._filament_state in ("changing", "loaded"):
                 self._filament_issue = None
                 self._filament_issue_code = None
+            self._sync_timelapse_capture_pause()
             return
 
         if command_type == 1085 and str(payload.get("errorCode") or "") == FILAMENT_RUNOUT_ERROR_CODE:
-            self._filament_state = "not_loaded"
-            self._filament_issue = "runout"
-            self._filament_issue_code = FILAMENT_RUNOUT_ERROR_CODE
-            if self._state in (PrintState.PRE_PRINT, PrintState.PRINTING, PrintState.PAUSED):
-                self._pause_reason = "filament_runout"
+            self._mark_filament_runout_pending()
+            return
+
+        if command_type == 1086 and str(payload.get("errorCode") or "") == FILAMENT_RUNOUT_ERROR_CODE:
+            if getattr(self, "_filament_issue", None) != "runout":
+                self._clear_filament_runout_pending()
+                self._sync_timelapse_capture_pause()
             return
 
         if (
@@ -948,11 +1047,8 @@ class MqttQueue(Service):
             and self._safe_int(payload.get("subType")) == 2
             and self._safe_int(payload.get("value")) == 6
         ):
-            self._filament_state = "not_loaded"
-            self._filament_issue = "runout"
-            self._filament_issue_code = FILAMENT_RUNOUT_ERROR_CODE
-            if self._state in (PrintState.PRE_PRINT, PrintState.PRINTING, PrintState.PAUSED):
-                self._pause_reason = "filament_runout"
+            self._mark_filament_runout()
+            self._sync_timelapse_capture_pause()
             return
 
     def _forward_to_ha(self, payload):
@@ -1103,9 +1199,12 @@ class MqttQueue(Service):
                 else:
                     self._transition_to_active(payload, progress=0)
             elif value == 2 and self._state == PrintState.PRINTING:
+                if self._has_recent_filament_runout_pending() and getattr(self, "_filament_issue", None) != "runout":
+                    self._mark_filament_runout()
                 self._state = PrintState.PAUSED
                 if getattr(self, "_filament_issue", None) == "runout":
                     self._pause_reason = "filament_runout"
+                self._sync_timelapse_capture_pause()
                 self._ha.update_state(print_status="paused")
                 log.info("Print paused (ct 1000 value=2)")
             elif value == 3 and self._state == PrintState.PAUSED:
@@ -1351,6 +1450,15 @@ class MqttQueue(Service):
 
     def get_state(self):
         """Return structured internal state for debug inspection."""
+        timelapse_state_getter = getattr(self._timelapse, "get_runtime_state", None)
+        if callable(timelapse_state_getter):
+            timelapse_state = timelapse_state_getter()
+        else:
+            capture_thread = getattr(self._timelapse, "_capture_thread", None)
+            timelapse_state = {
+                "enabled": getattr(self._timelapse, "enabled", None),
+                "capturing": bool(capture_thread and capture_thread.is_alive()),
+            }
         return {
             "print": {
                 "print_state": self._state.value,
@@ -1391,10 +1499,7 @@ class MqttQueue(Service):
                 "step_len": getattr(self, "_filament_change_step_len", None),
             },
             "debug_logging": getattr(self, "_debug_log_payloads", False),
-            "timelapse": {
-                "enabled": getattr(self._timelapse, "enabled", None),
-                "capturing": bool(getattr(self._timelapse, "_capture_thread", None)),
-            },
+            "timelapse": timelapse_state,
         }
 
     def simulate_event(self, event_type, payload=None):

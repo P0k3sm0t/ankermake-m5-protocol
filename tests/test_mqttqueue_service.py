@@ -6,6 +6,9 @@ from web.service.mqtt import MqttQueue, PrintState
 
 def _queue():
     queue = object.__new__(MqttQueue)
+    queue.printer_index = 0
+    queue._printer_name = "Thing 1"
+    queue._printer_sn = "TEST-SN"
     queue._ha = SimpleNamespace(enabled=True, update_state=lambda **kwargs: ha_updates.append(kwargs))
     queue._notifier = SimpleNamespace(
         is_event_enabled=lambda event: True,
@@ -22,6 +25,7 @@ def _queue():
         start_capture=lambda filename="unknown": timelapse_calls.append(("start", filename)),
         finish_capture=lambda final=False: timelapse_calls.append(("finish", final)),
         fail_capture=lambda: timelapse_calls.append(("fail",)),
+        set_capture_paused=lambda paused, reason=None: None,
         enabled=True,
         _capture_thread=None,
     )
@@ -44,6 +48,7 @@ def _queue():
     queue._control_username = "tester@example.com"
     queue._control_user_id = "user-123"
     queue._debug_log_payloads = False
+    queue._record_printer_alert = lambda **kwargs: None
     queue._reset_print_state()
     return queue
 
@@ -117,7 +122,7 @@ def test_handle_notification_tracks_filament_changing_state():
     assert state["step_len"] == 40
 
 
-def test_handle_notification_tracks_filament_runout_alarm_state():
+def test_handle_notification_does_not_confirm_filament_runout_on_alarm_alone():
     global ha_updates, history_calls, timelapse_calls, events
     ha_updates, history_calls, timelapse_calls, events = [], [], [], []
     queue = _queue()
@@ -129,12 +134,12 @@ def test_handle_notification_tracks_filament_runout_alarm_state():
     })
     state = queue.get_state()["filament"]
 
-    assert state["state"] == "not_loaded"
-    assert state["label"] == "Not Loaded"
+    assert state["state"] == "unknown"
+    assert state["label"] == "Unknown"
     assert state["loaded"] is None
-    assert state["issue"] == "runout"
-    assert state["issue_label"] == "Filament runout"
-    assert state["detail"] == "Filament runout or break detected."
+    assert state["issue"] is None
+    assert state["issue_label"] is None
+    assert state["detail"] is None
 
 
 def test_handle_notification_exposes_filament_pause_reason_when_print_pauses():
@@ -155,7 +160,123 @@ def test_handle_notification_exposes_filament_pause_reason_when_print_pauses():
     assert state["print"]["pause_reason_label"] == "Filament runout"
     assert state["filament"]["pause_reason"] == "filament_runout"
     assert state["filament"]["pause_reason_label"] == "Filament runout"
-    assert state["filament"]["detail"] == "Printer paused for filament reload."
+    assert state["filament"]["detail"] == "Paused: Filament runout. Reload filament to continue."
+
+
+def test_filament_runout_pause_keeps_not_loaded_until_resume():
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+    queue._state = PrintState.PRINTING
+
+    queue._handle_notification({
+        "commandType": 1085,
+        "errorCode": "0xFF01030001",
+        "errorLevel": "P1",
+    })
+    queue._handle_notification({"commandType": 1000, "value": 2})
+    queue._handle_notification({"commandType": 1023, "value": 0, "progress": 100, "stepLen": 20})
+
+    paused_state = queue.get_state()["filament"]
+    assert paused_state["state"] == "not_loaded"
+    assert paused_state["issue"] == "runout"
+    assert paused_state["detail"] == "Paused: Filament runout. Reload filament to continue."
+
+    queue._handle_notification({"commandType": 1000, "value": 3})
+
+    resumed_state = queue.get_state()["filament"]
+    assert resumed_state["state"] == "loaded"
+    assert resumed_state["issue"] is None
+    assert resumed_state["pause_reason"] is None
+
+
+def test_filament_change_and_runout_pause_timelapse_snapshots():
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+    queue._state = PrintState.PRINTING
+    pause_calls = []
+    queue._timelapse.set_capture_paused = lambda paused, reason=None: pause_calls.append((paused, reason))
+
+    queue._handle_notification({"commandType": 1023, "value": 2, "progress": 25, "stepLen": 20})
+    queue._handle_notification({
+        "commandType": 1085,
+        "errorCode": "0xFF01030001",
+        "errorLevel": "P1",
+    })
+    queue._handle_notification({"commandType": 1000, "value": 2})
+    queue._handle_notification({"commandType": 1000, "value": 3})
+
+    assert pause_calls[0] == (True, "filament_change")
+    assert (True, "filament_runout") in pause_calls
+    assert pause_calls[-1] == (False, None)
+
+
+def test_handle_notification_records_cross_printer_runout_alert(monkeypatch):
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+    queue.printer_index = 1
+    queue._printer_name = "Thing 2"
+    alerts = []
+    del queue._record_printer_alert
+    monkeypatch.setattr(
+        "web.service.mqtt.app.record_printer_alert",
+        lambda **kwargs: alerts.append(kwargs),
+        raising=False,
+    )
+
+    queue._handle_notification({
+        "commandType": 1085,
+        "errorCode": "0xFF01030001",
+        "errorLevel": "P1",
+    })
+    queue._handle_notification({
+        "commandType": 1000,
+        "subType": 2,
+        "value": 6,
+    })
+
+    assert len(alerts) == 1
+    assert alerts[0]["printer_index"] == 1
+    assert alerts[0]["printer_name"] == "Thing 2"
+    assert alerts[0]["alert_type"] == "filament_runout"
+
+
+def test_filament_runout_alarm_clears_if_printer_sends_clear_without_pause():
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+
+    queue._handle_notification({
+        "commandType": 1085,
+        "errorCode": "0xFF01030001",
+        "errorLevel": "P1",
+    })
+    queue._handle_notification({
+        "commandType": 1086,
+        "errorCode": "0xFF01030001",
+        "errorLevel": "P1",
+    })
+    queue._handle_notification({"commandType": 1000, "value": 2})
+
+    state = queue.get_state()
+    assert state["filament"]["issue"] is None
+    assert state["print"]["pause_reason"] is None
+
+
+def test_get_state_reports_timelapse_not_capturing_for_dead_thread():
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+
+    class DeadThread:
+        def is_alive(self):
+            return False
+
+    queue._timelapse._capture_thread = DeadThread()
+
+    assert queue.get_state()["timelapse"]["capturing"] is False
 
 
 def test_event_notify_filament_break_sets_not_loaded_until_change_cycle_completes():
