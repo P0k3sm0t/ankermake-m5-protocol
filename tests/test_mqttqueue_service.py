@@ -243,6 +243,48 @@ def test_handle_notification_records_cross_printer_runout_alert(monkeypatch):
     assert alerts[0]["alert_type"] == "filament_runout"
 
 
+def test_handle_notification_records_cross_printer_print_complete_alert(monkeypatch):
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+    queue.printer_index = 1
+    queue._printer_name = "Thing 2"
+    alerts = []
+    del queue._record_printer_alert
+    monkeypatch.setattr(
+        "web.service.mqtt.app.record_printer_alert",
+        lambda **kwargs: alerts.append(kwargs),
+        raising=False,
+    )
+
+    queue._handle_notification({"commandType": 1044, "filePath": "/tmp/completed.gcode"})
+    queue._handle_notification({"commandType": 1000, "value": 1})
+    queue._handle_notification({"commandType": 1000, "value": 0})
+
+    assert len(alerts) == 1
+    assert alerts[0]["printer_index"] == 1
+    assert alerts[0]["printer_name"] == "Thing 2"
+    assert alerts[0]["alert_type"] == "print_complete"
+    assert alerts[0]["title"] == "Print complete"
+    assert alerts[0]["message"] == "completed.gcode finished printing."
+    assert alerts[0]["level"] == "success"
+
+
+def test_cancelled_print_does_not_record_print_complete_alert():
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+    alerts = []
+    queue._record_printer_alert = lambda **kwargs: alerts.append(kwargs)
+
+    queue._handle_notification({"commandType": 1044, "filePath": "/tmp/cancelled.gcode"})
+    queue._handle_notification({"commandType": 1000, "value": 1})
+    queue._stop_requested = True
+    queue._handle_notification({"commandType": 1000, "value": 0})
+
+    assert alerts == []
+
+
 def test_filament_runout_alarm_clears_if_printer_sends_clear_without_pause():
     global ha_updates, history_calls, timelapse_calls, events
     ha_updates, history_calls, timelapse_calls, events = [], [], [], []

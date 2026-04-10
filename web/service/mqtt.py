@@ -1041,6 +1041,17 @@ class MqttQueue(Service):
             )
         return newly_detected
 
+    def _record_print_complete_alert(self, filename=None):
+        finished_name = os.path.basename(str(filename or self._last_filename or "")).strip()
+        message = f"{finished_name} finished printing." if finished_name else "Print finished."
+        self._record_printer_alert(
+            alert_type="print_complete",
+            title="Print complete",
+            message=message,
+            level="success",
+            cooldown_sec=60,
+        )
+
     def _update_filament_state(self, payload):
         if not isinstance(payload, dict):
             return
@@ -1279,6 +1290,7 @@ class MqttQueue(Service):
                     else:
                         # Print ended normally
                         log.info(f"History: print finished (ct 1000 value=0), filename={self._last_filename!r}")
+                        self._record_print_complete_alert()
                         self._remember_recent_completion()
                         self._history.record_finish(filename=self._last_filename, task_id=self._last_task_id)
                         self._timelapse.finish_capture(final=True)
@@ -1412,6 +1424,7 @@ class MqttQueue(Service):
         status_text = self._extract_status_text(payload)
         if self._state == PrintState.PRINTING and status_text:
             if any(word in status_text for word in ("finish", "complete", "done")):
+                self._record_print_complete_alert()
                 self._send_event(
                     EVENT_PRINT_FINISHED,
                     self._build_payload(payload, 100),
@@ -1425,6 +1438,7 @@ class MqttQueue(Service):
                 return
 
         if self._state == PrintState.PRINTING and progress >= 100:
+            self._record_print_complete_alert()
             self._send_event(
                 EVENT_PRINT_FINISHED,
                 self._build_payload(payload, 100),
