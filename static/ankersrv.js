@@ -500,6 +500,20 @@ $(function () {
         resumeAvailable: false,
         resumeFrameCount: 0,
     };
+    const _cameraState = {
+        source: "printer",
+        effectiveSource: null,
+        printerSupported: false,
+        featureAvailable: false,
+        detail: null,
+        externalName: null,
+        externalConfigured: false,
+        externalRefreshSec: 3,
+    };
+    let _cameraSettingsLoading = false;
+    let _externalCameraPreviewTimer = null;
+    let _externalCameraPreviewToken = 0;
+    let videoEnabled = false;
 
     function setFilamentState(label, detail = null, detailTone = null) {
         const el = $("#filament-state");
@@ -630,6 +644,103 @@ $(function () {
         }
     }
 
+    function applyCameraRuntimeState(camera) {
+        if (!camera || typeof camera !== "object") {
+            return;
+        }
+        _cameraState.source = String(camera.source || _cameraState.source || "printer");
+        _cameraState.effectiveSource = camera.effective_source || null;
+        _cameraState.printerSupported = !!camera.printer_supported;
+        _cameraState.featureAvailable = !!camera.feature_available;
+        _cameraState.detail = camera.detail || null;
+        _cameraState.externalName = camera.external_name || null;
+        _cameraState.externalConfigured = !!camera.external_configured;
+        _cameraState.externalRefreshSec = Math.max(1, Number(camera.external_refresh_sec || 3));
+        renderCameraUi();
+    }
+
+    function stopExternalCameraPreview(resetImage = true) {
+        _externalCameraPreviewToken += 1;
+        if (_externalCameraPreviewTimer) {
+            clearTimeout(_externalCameraPreviewTimer);
+            _externalCameraPreviewTimer = null;
+        }
+        const img = document.getElementById("external-camera-preview");
+        if (img) {
+            img.onload = null;
+            img.onerror = null;
+            if (resetImage) {
+                img.src = "/static/img/load-screen.svg";
+            }
+        }
+    }
+
+    function scheduleExternalCameraPreview(delayMs) {
+        if (_cameraState.effectiveSource !== "external") {
+            return;
+        }
+        if (_externalCameraPreviewTimer) {
+            clearTimeout(_externalCameraPreviewTimer);
+        }
+        _externalCameraPreviewTimer = setTimeout(function () {
+            const img = document.getElementById("external-camera-preview");
+            if (!img || _cameraState.effectiveSource !== "external") {
+                return;
+            }
+            const token = _externalCameraPreviewToken;
+            const refreshMs = Math.max(1000, Math.round(_cameraState.externalRefreshSec * 1000));
+            img.onload = function () {
+                if (token !== _externalCameraPreviewToken) {
+                    return;
+                }
+                scheduleExternalCameraPreview(refreshMs);
+            };
+            img.onerror = function () {
+                if (token !== _externalCameraPreviewToken) {
+                    return;
+                }
+                scheduleExternalCameraPreview(refreshMs);
+            };
+            img.src = `/api/camera/frame?ts=${Date.now()}`;
+        }, Math.max(0, delayMs || 0));
+    }
+
+    function renderCameraUi() {
+        const select = $("#camera-source-select");
+        if (select.length) {
+            const printerOption = select.find('option[value="printer"]');
+            printerOption.prop("disabled", !_cameraState.printerSupported && _cameraState.source !== "printer");
+            select.val(_cameraState.source || "printer");
+        }
+
+        let detail = String(_cameraState.detail || "").trim();
+        if (_cameraState.effectiveSource === "printer" && typeof videoEnabled !== "undefined" && !videoEnabled) {
+            detail = detail ? `${detail} Enable printer video to start live view.` : "Enable printer video to start live view.";
+        }
+        $("#camera-source-status").text(detail || "No camera source selected.");
+
+        const printerMode = _cameraState.effectiveSource === "printer";
+        const externalMode = _cameraState.effectiveSource === "external";
+
+        if (!printerMode) {
+            $("#vplayer").hide();
+        }
+        $("#video-toggle-container").toggle(printerMode);
+        $("#external-camera-container").toggle(externalMode);
+        $("#camera-unavailable").toggle(!printerMode && !externalMode);
+
+        $("#printer-camera-controls").toggle(printerMode);
+        $("#printer-camera-quality-wrap").toggle(printerMode);
+        $("#external-camera-controls").toggleClass("d-none", !externalMode);
+
+        if (externalMode) {
+            stopExternalCameraPreview(false);
+            scheduleExternalCameraPreview(0);
+        } else {
+            stopExternalCameraPreview();
+        }
+    }
+
     function applyRuntimeState(data) {
         if (!data || typeof data !== "object") {
             return;
@@ -649,6 +760,7 @@ $(function () {
         _timelapseRuntime.promptFilename = timelapse.prompt_filename || null;
         _timelapseRuntime.resumeAvailable = !!timelapse.resume_available;
         _timelapseRuntime.resumeFrameCount = Number(timelapse.resume_frame_count || 0);
+        applyCameraRuntimeState(data.camera || {});
 
         if (data.print && data.print.state !== undefined) {
             _updatePrintControlButtons(_normalizePrintStateValue(data.print.state));
@@ -1472,13 +1584,11 @@ $(function () {
 
     sockets.video.autoReconnect = false;
 
-    let videoEnabled = false;
-
-    $("#video-toggle").on("click", function () {
-        videoEnabled = !videoEnabled;
+    function setPrinterVideoEnabled(enabled) {
+        videoEnabled = !!enabled;
         if (videoEnabled) {
             $("#vplayer").show();
-            $(this).html('<i class="bi bi-camera-video-off"></i> Disable Video');
+            $("#video-toggle").html('<i class="bi bi-camera-video-off"></i> Disable Video');
             sendCtrlMessage({ video_enabled: true });
             sockets.video.autoReconnect = true;
             if (!sockets.video.ws) {
@@ -1486,7 +1596,7 @@ $(function () {
             }
         } else {
             $("#vplayer").hide();
-            $(this).html('<i class="bi bi-camera-video"></i> Enable Video');
+            $("#video-toggle").html('<i class="bi bi-camera-video"></i> Enable Video');
             sendCtrlMessage({ video_enabled: false });
             sockets.video.autoReconnect = false;
             if (sockets.video.ws) {
@@ -1497,6 +1607,11 @@ $(function () {
             }
             $("#video-resolution").text("Current: -");
         }
+        renderCameraUi();
+    }
+
+    $("#video-toggle").on("click", function () {
+        setPrinterVideoEnabled(!videoEnabled);
     });
 
     /**
@@ -2695,7 +2810,7 @@ $(function () {
     /**
      * Snapshot Button
      */
-    $("#snapshot-btn").on("click", async function () {
+    $("#snapshot-btn, #snapshot-btn-secondary").on("click", async function () {
         const btn = $(this);
         btn.prop("disabled", true);
         try {
@@ -2723,6 +2838,139 @@ $(function () {
             btn.prop("disabled", false);
         }
     });
+
+    function applyCameraSettingsToForm(camera) {
+        $("#camera-external-name").val(camera && camera.external ? camera.external.name || "" : "");
+        $("#camera-external-stream-url").val(camera && camera.external ? camera.external.stream_url || "" : "");
+        $("#camera-external-snapshot-url").val(camera && camera.external ? camera.external.snapshot_url || "" : "");
+        $("#camera-external-refresh").val(camera && camera.external ? camera.external.refresh_sec || 3 : 3);
+    }
+
+    async function loadCameraSettings() {
+        if (_cameraSettingsLoading) {
+            return;
+        }
+        _cameraSettingsLoading = true;
+        try {
+            const resp = await fetch("/api/settings/camera");
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) {
+                throw new Error(data.error || `HTTP ${resp.status}`);
+            }
+            applyCameraRuntimeState(data.camera || {});
+            applyCameraSettingsToForm(data.camera || {});
+        } catch (err) {
+            flash_message(`Failed to load camera settings: ${err.message || err}`, "danger");
+        } finally {
+            _cameraSettingsLoading = false;
+        }
+    }
+
+    async function saveCameraSettings(payload, successMessage = null) {
+        const resp = await fetch("/api/settings/camera", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ camera: payload }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+            throw new Error(data.error || `HTTP ${resp.status}`);
+        }
+        applyCameraRuntimeState(data.camera || {});
+        applyCameraSettingsToForm(data.camera || {});
+        if (_cameraState.effectiveSource !== "printer" && videoEnabled) {
+            setPrinterVideoEnabled(false);
+        }
+        if (successMessage) {
+            flash_message(successMessage, "success");
+        }
+        return data.camera || {};
+    }
+
+    $("#camera-save").on("click", async function () {
+        const btn = $(this);
+        btn.prop("disabled", true);
+        try {
+            await saveCameraSettings({
+                external: {
+                    name: $("#camera-external-name").val().trim(),
+                    stream_url: $("#camera-external-stream-url").val().trim(),
+                    snapshot_url: $("#camera-external-snapshot-url").val().trim(),
+                    refresh_sec: parseInt($("#camera-external-refresh").val(), 10) || 3,
+                },
+            }, "External camera settings saved");
+        } catch (err) {
+            flash_message(`Failed to save camera settings: ${err.message || err}`, "danger");
+        } finally {
+            btn.prop("disabled", false);
+        }
+    });
+
+    $("#camera-source-select").on("change", async function () {
+        const select = $(this);
+        const selected = select.val() || "printer";
+        select.prop("disabled", true);
+        try {
+            const successMessage = selected === "external"
+                ? (_cameraState.externalConfigured
+                    ? "Camera source switched to external camera."
+                    : "External camera selected. Finish setup in Setup -> Camera to use it.")
+                : "Camera source switched to printer camera.";
+            await saveCameraSettings({ source: selected }, successMessage);
+        } catch (err) {
+            flash_message(`Failed to switch camera source: ${err.message || err}`, "danger");
+            await loadCameraSettings();
+        } finally {
+            select.prop("disabled", false);
+        }
+    });
+
+    $("#launcher-download-btn").on("click", async function () {
+        const btn = $(this);
+        const installDir = ($("#launcher-install-dir").val() || "").trim();
+        if (!installDir) {
+            flash_message("Enter the Ankerctl folder before downloading the launcher.", "warning");
+            return;
+        }
+        btn.prop("disabled", true);
+        try {
+            const resp = await fetch("/api/settings/launcher-bat", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ install_dir: installDir }),
+            });
+            const data = await resp.blob();
+            if (!resp.ok) {
+                const text = await data.text().catch(() => "");
+                let errorMessage = `HTTP ${resp.status}`;
+                try {
+                    const parsed = JSON.parse(text);
+                    errorMessage = parsed.error || errorMessage;
+                } catch (_err) {
+                    if (text) {
+                        errorMessage = text;
+                    }
+                }
+                throw new Error(errorMessage);
+            }
+
+            const url = URL.createObjectURL(data);
+            const link = document.createElement("a");
+            link.href = url;
+            link.download = "ankerctl-launcher.bat";
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            URL.revokeObjectURL(url);
+            flash_message("Windows launcher downloaded.", "success");
+        } catch (err) {
+            flash_message(`Failed to download launcher: ${err.message || err}`, "danger");
+        } finally {
+            btn.prop("disabled", false);
+        }
+    });
+
+    loadCameraSettings();
 
     /**
      * GCode Console

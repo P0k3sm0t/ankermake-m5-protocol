@@ -207,6 +207,64 @@ def test_timelapse_and_mqtt_settings_endpoints_reload_services():
     assert hasattr(reload_calls[1][1], "modify")
 
 
+def test_camera_settings_endpoints_persist_per_printer():
+    client = app.test_client()
+    cfg = _base_config()
+    cfg.printers.append(_printer(sn="SN2", name="Printer 2"))
+    old, old_svc, cfg, _mqtt = _install_app_state(cfg=cfg)
+
+    try:
+        got = client.get("/api/settings/camera", headers={"X-Api-Key": "secret-key-123456"})
+        updated = client.post(
+            "/api/settings/camera",
+            json={
+                "camera": {
+                    "source": "external",
+                    "external": {
+                        "name": "Workbench Cam",
+                        "snapshot_url": "http://cam.local/snapshot.jpg",
+                        "refresh_sec": 4,
+                    },
+                }
+            },
+            headers={"X-Api-Key": "secret-key-123456"},
+        )
+    finally:
+        _restore_app_state(old, old_svc)
+
+    assert got.status_code == 200
+    assert got.get_json()["camera"]["source"] == "printer"
+    assert updated.status_code == 200
+    camera = updated.get_json()["camera"]
+    assert camera["source"] == "external"
+    assert camera["effective_source"] == "external"
+    assert camera["external"]["name"] == "Workbench Cam"
+    assert camera["external"]["snapshot_url"] == "http://cam.local/snapshot.jpg"
+    assert cfg.camera["per_printer"]["SN1"]["source"] == "external"
+    assert "SN2" not in cfg.camera["per_printer"]
+
+
+def test_launcher_bat_download_uses_requested_install_dir():
+    client = app.test_client()
+    old, old_svc, _cfg, _mqtt = _install_app_state()
+
+    try:
+        response = client.post(
+            "/api/settings/launcher-bat",
+            json={"install_dir": r"C:\Users\TestUser\Documents\GitHub\ankermake-m5-protocol"},
+            headers={"X-Api-Key": "secret-key-123456"},
+        )
+    finally:
+        _restore_app_state(old, old_svc)
+
+    body = response.get_data(as_text=True)
+    assert response.status_code == 200
+    assert 'attachment; filename="ankerctl-launcher.bat"' in response.headers["Content-Disposition"]
+    assert r'set "ANKERCTL_DIR=C:\Users\TestUser\Documents\GitHub\ankermake-m5-protocol"' in body
+    assert r"py .\ankerctl.py webserver run" in body
+    assert r"python .\ankerctl.py webserver run" in body
+
+
 def test_filament_service_settings_endpoints_persist_manual_and_legacy_modes():
     client = app.test_client()
     old, old_svc, cfg, _mqtt = _install_app_state()

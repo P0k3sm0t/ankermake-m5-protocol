@@ -114,7 +114,7 @@ class MqttQueue(Service):
         self._notifier = AppriseNotifier(app.config["config"])
         config_root = str(app.config["config"].config_root)
         self._history = PrintHistory(db_path=f"{config_root}/history.db")
-        self._timelapse = TimelapseService(app.config["config"])
+        self._timelapse = TimelapseService(app.config["config"], printer_index=self.printer_index)
 
         # Home Assistant MQTT Discovery
         printer_sn = None

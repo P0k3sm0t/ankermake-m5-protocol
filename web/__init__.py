@@ -33,6 +33,7 @@ import math
 import os
 import secrets
 import shutil
+import subprocess
 import threading
 import time
 from collections import deque
@@ -48,6 +49,7 @@ class _AccessLogNoiseFilter(logging.Filter):
         '"GET /api/console/logs',
         '"GET /api/printer/alerts',
         '"GET /api/printer/runtime-state',
+        '"GET /api/camera/frame',
     )
 
     def filter(self, record):
@@ -258,6 +260,7 @@ from libflagship.notifications import AppriseClient
 from web.lib.service import ServiceManager, RunState, ServiceStoppedError
 
 import web.config
+import web.camera
 import web.platform
 import web.util
 
@@ -358,6 +361,81 @@ def _video_has_recent_frame(vq, wait_sec=SNAPSHOT_FRAME_WAIT_SEC, max_age_sec=SN
         time.sleep(0.1)
 
 
+def _active_printer(cfg=None, printer_index=None):
+    if cfg is None:
+        config = app.config.get("config")
+        if not config:
+            return None
+        with config.open() as opened_cfg:
+            return _active_printer(opened_cfg, printer_index=printer_index)
+
+    printers = getattr(cfg, "printers", None) or []
+    if printer_index is None:
+        printer_index = app.config.get("printer_index", 0)
+    if printer_index < 0 or printer_index >= len(printers):
+        return None
+    return printers[printer_index]
+
+
+def _resolve_camera_settings(cfg=None, printer_index=None):
+    if cfg is None:
+        config = app.config.get("config")
+        if not config:
+            return web.camera.resolve_camera_settings(None, printer_index or 0)
+        with config.open() as opened_cfg:
+            return _resolve_camera_settings(opened_cfg, printer_index=printer_index)
+
+    if printer_index is None:
+        printer_index = app.config.get("printer_index", 0)
+    return web.camera.resolve_camera_settings(cfg, printer_index=printer_index)
+
+
+def _camera_feature_available(cfg=None, printer_index=None):
+    camera_settings = _resolve_camera_settings(cfg, printer_index=printer_index)
+    return bool(camera_settings.get("feature_available"))
+
+
+def _build_runtime_state_payload(mqtt, cfg=None, printer_index=None):
+    state = mqtt.get_state() if mqtt else {}
+    payload = dict(state)
+    payload["camera"] = web.camera.runtime_camera_state(
+        _resolve_camera_settings(cfg, printer_index=printer_index)
+    )
+    return payload
+
+
+def _build_windows_launcher_bat(install_dir):
+    install_dir = str(install_dir or "").strip()
+    if not install_dir:
+        raise ValueError("Install directory is required.")
+    if '"' in install_dir:
+        raise ValueError('Install directory cannot contain double quotes.')
+
+    escaped_dir = install_dir.replace("%", "%%")
+    lines = [
+        "@echo off",
+        "setlocal",
+        f'set "ANKERCTL_DIR={escaped_dir}"',
+        'cd /d "%ANKERCTL_DIR%" || (',
+        '    echo Could not open the Ankerctl folder:',
+        '    echo %ANKERCTL_DIR%',
+        "    pause",
+        "    exit /b 1",
+        ")",
+        "echo Starting ankerctl web server...",
+        "where py >nul 2>&1",
+        "if %errorlevel%==0 (",
+        "    py .\\ankerctl.py webserver run",
+        ") else (",
+        "    python .\\ankerctl.py webserver run",
+        ")",
+        "echo.",
+        "echo ankerctl exited.",
+        "pause",
+    ]
+    return "\r\n".join(lines) + "\r\n"
+
+
 def _configure_request_limits(flask_app, env=None):
     # Keep large GCode uploads configurable, but bound multipart metadata more
     # tightly. These form limits apply to multipart parsing, not the file size.
@@ -437,7 +515,7 @@ _log_dir = os.getenv("ANKERCTL_LOG_DIR") or ("/logs" if os.path.isdir("/logs") e
 
 sock = Sock(app)
 
-PRINTERS_WITHOUT_CAMERA = ["V8110"]
+PRINTERS_WITHOUT_CAMERA = sorted(web.camera.PRINTERS_WITHOUT_CAMERA)
 
 # Devices that must never be controlled — not 3D printers (e.g. UV printers).
 # When the active printer matches one of these model codes, all services are
@@ -1398,6 +1476,13 @@ def app_root():
             upload_rate_source = None
             country = ""
 
+        active_camera = _resolve_camera_settings(cfg, printer_index=app.config.get("printer_index", 0)) if cfg else _resolve_camera_settings(None)
+        printer_video_supported = bool(app.config.get("video_supported", False))
+        show_camera_ffmpeg_warning = bool(
+            printer_video_supported
+            or (active_camera.get("external") or {}).get("configured")
+        )
+
         if ":" in request.host:
             request_host, request_port = request.host.split(":", 1)
         else:
@@ -1415,6 +1500,10 @@ def app_root():
             country_codes=json.dumps(cli.countrycodes.country_codes),
             current_country=country,
             video_supported=app.config.get("video_supported", False),
+            printer_video_supported=printer_video_supported,
+            camera_features_available=bool(active_camera.get("feature_available")),
+            active_camera=active_camera,
+            show_camera_ffmpeg_warning=show_camera_ffmpeg_warning,
             ffmpeg_available=_ffmpeg_available(),
             upload_rate_mbps=upload_rate_mbps,
             upload_rate_config=upload_rate_config,
@@ -1428,6 +1517,7 @@ def app_root():
             active_printer_index=app.config["printer_index"],
             printer_index_locked=app.config.get("printer_index_locked", False),
             unsupported_device=app.config.get("unsupported_device", False),
+            ankerctl_root=os.path.realpath(ROOT_DIR),
         )
 
 
@@ -1900,6 +1990,59 @@ def app_api_notifications_test():
     if ok:
         return {"status": "ok", "message": message}
     return {"error": message}, 400
+
+
+@app.get("/api/settings/camera")
+def app_api_settings_camera():
+    config = app.config["config"]
+    with config.open() as cfg:
+        if not cfg:
+            return {"error": "No printers configured"}, 400
+        camera_config = _resolve_camera_settings(cfg)
+    return {"camera": camera_config}
+
+
+@app.post("/api/settings/camera")
+def app_api_settings_camera_update():
+    config = app.config["config"]
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return {"error": "Invalid JSON payload"}, 400
+
+    camera_payload = payload.get("camera") if "camera" in payload else payload
+    if not isinstance(camera_payload, dict):
+        return {"error": "Invalid camera payload"}, 400
+
+    with config.modify() as cfg:
+        if not cfg:
+            return {"error": "No printers configured"}, 400
+        try:
+            camera_config = web.camera.update_camera_settings(cfg, app.config.get("printer_index", 0), camera_payload)
+        except ValueError as exc:
+            return {"error": str(exc)}, 400
+
+    return {"status": "ok", "camera": camera_config}
+
+
+@app.post("/api/settings/launcher-bat")
+def app_api_settings_launcher_bat():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return {"error": "Invalid JSON payload"}, 400
+
+    install_dir = payload.get("install_dir")
+    try:
+        script = _build_windows_launcher_bat(install_dir)
+    except ValueError as exc:
+        return {"error": str(exc)}, 400
+
+    return Response(
+        script,
+        mimetype="text/plain",
+        headers={
+            "Content-Disposition": 'attachment; filename="ankerctl-launcher.bat"',
+        },
+    )
 
 
 @app.get("/api/settings/timelapse")
@@ -2607,7 +2750,7 @@ def app_api_printer_runtime_state():
     with borrow_mqtt() as mqtt:
         if not mqtt:
             return {"error": "Service unavailable"}, 503
-        state = mqtt.get_state()
+        state = _build_runtime_state_payload(mqtt)
     return {"status": "ok", **state}
 
 
@@ -2635,93 +2778,132 @@ def app_api_printer_bed_leveling_last():
     return data
 
 
-@app.get("/api/snapshot")
-def app_api_snapshot():
-    """Capture a JPEG snapshot from the camera and return it as a file download."""
-    import subprocess
-    import tempfile
+def _local_web_host_port():
+    host = os.getenv("FLASK_HOST") or "127.0.0.1"
+    if host in {"0.0.0.0", "::"}:
+        host = "127.0.0.1"
+    port = os.getenv("FLASK_PORT") or str(app.config.get("port") or "4470")
+    return host, port
 
-    if not app.config.get("video_supported"):
-        return {"error": "Video not supported on this platform"}, 400
 
-    ffmpeg_path = _ffmpeg_path()
-    if not ffmpeg_path:
-        return {"error": "ffmpeg not installed"}, 500
+def _validate_selected_printer_camera(camera_settings):
+    if camera_settings.get("effective_source") != web.camera.CAMERA_SOURCE_PRINTER:
+        return None
+
+    if not app.config.get("video_supported", False):
+        return {"error": "Printer camera is not supported for the selected printer"}, 400
 
     vq = app.svc.svcs.get("videoqueue")
     if not vq:
         return {"error": "Video service not available"}, 503
     if not getattr(vq, "video_enabled", False):
-        return {"error": "Enable video before taking a snapshot"}, 409
+        return {"error": "Enable printer video before taking a snapshot"}, 409
     if not _video_has_recent_frame(vq):
-        return {"error": "Video is enabled, but no live camera frames are available yet. Wait for live video to appear and try again."}, 409
+        return {
+            "error": "Printer video is enabled, but no live camera frames are available yet. Wait for live video to appear and try again."
+        }, 409
+    return None
 
-    host = os.getenv("FLASK_HOST") or "127.0.0.1"
-    if host in {"0.0.0.0", "::"}:
-        host = "127.0.0.1"
-    port = os.getenv("FLASK_PORT") or "4470"
-    url = f"http://{host}:{port}/video"
-    # Pass API key as query parameter so the internal /video call is authenticated
-    # when a key is configured.  The URL is loopback-only and never sent to clients.
-    snap_api_key = app.config.get("api_key")
-    if snap_api_key:
-        from urllib.parse import quote as _quote
-        url += f"?apikey={_quote(snap_api_key, safe='')}"
 
-    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
-    temp_path = temp_file.name
-    temp_file.close()
+def _capture_selected_camera_snapshot_temp(camera_settings, *, scale=None, for_timelapse=False):
+    ffmpeg_path = _ffmpeg_path()
+    if not ffmpeg_path:
+        raise RuntimeError("ffmpeg not installed")
+
+    camera_error = _validate_selected_printer_camera(camera_settings)
+    if camera_error is not None:
+        raise ValueError(camera_error)
+
+    temp_path = web.camera.create_temp_snapshot_file()
+    host, port = _local_web_host_port()
+    web.camera.capture_camera_snapshot_to_file(
+        camera_settings,
+        ffmpeg_path,
+        temp_path,
+        host=host,
+        port=port,
+        api_key=app.config.get("api_key"),
+        timeout=SNAPSHOT_FFMPEG_TIMEOUT_SEC,
+        for_timelapse=for_timelapse,
+        scale=scale,
+    )
+    return temp_path
+
+
+@app.get("/api/camera/frame")
+def app_api_camera_frame():
+    """Return a current frame from the selected camera as an inline JPEG."""
+    from flask import after_this_request, send_file
+
+    camera_settings = _resolve_camera_settings()
+    if not camera_settings.get("effective_source"):
+        return {"error": camera_settings.get("detail") or "No camera source is available"}, 400
 
     try:
-        result = subprocess.run(
-            [ffmpeg_path, "-loglevel", "error", "-nostdin", "-y",
-             "-f", "h264", "-i", url, "-frames:v", "1", temp_path],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=SNAPSHOT_FFMPEG_TIMEOUT_SEC,
-        )
-        if result.returncode != 0:
-            # Retry without -f h264
-            result = subprocess.run(
-                [ffmpeg_path, "-loglevel", "error", "-nostdin", "-y",
-                 "-i", url, "-frames:v", "1", temp_path],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=SNAPSHOT_FFMPEG_TIMEOUT_SEC,
-            )
-        if result.returncode != 0 or not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
-            stderr = result.stderr.decode("utf-8", errors="replace").strip()
-            if stderr:
-                log.warning("Snapshot ffmpeg failed: %s", stderr)
-            try:
-                os.remove(temp_path)
-            except OSError:
-                pass
-            return {"error": "Snapshot capture failed"}, 500
-
-        from flask import send_file, after_this_request
-        from datetime import datetime
-
-        @after_this_request
-        def _cleanup(response):
-            try:
-                os.remove(temp_path)
-            except OSError:
-                pass
-            return response
-
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return send_file(temp_path, mimetype="image/jpeg",
-                         as_attachment=True,
-                         download_name=f"ankerctl_snapshot_{timestamp}.jpg")
+        temp_path = _capture_selected_camera_snapshot_temp(camera_settings, scale=(1280, 720))
+    except RuntimeError as exc:
+        return {"error": str(exc)}, 500
+    except ValueError as exc:
+        payload, status = exc.args[0]
+        return payload, status
+    except web.camera.CameraCaptureError as exc:
+        return {"error": str(exc)}, 502
     except subprocess.TimeoutExpired:
+        return {"error": "Camera frame timed out waiting for a response."}, 504
+    except OSError as exc:
+        return {"error": f"Camera frame capture failed: {exc}"}, 500
+
+    @after_this_request
+    def _cleanup(response):
         try:
             os.remove(temp_path)
         except OSError:
             pass
-        return {"error": "Snapshot timed out waiting for a camera frame. Wait for live video to update and try again."}, 504
+        return response
+
+    return send_file(temp_path, mimetype="image/jpeg", as_attachment=False)
+
+
+@app.get("/api/snapshot")
+def app_api_snapshot():
+    """Capture a JPEG snapshot from the camera and return it as a file download."""
+    import subprocess
+    from datetime import datetime
+    from flask import after_this_request, send_file
+
+    camera_settings = _resolve_camera_settings()
+    if not camera_settings.get("effective_source"):
+        return {"error": camera_settings.get("detail") or "No camera source is available"}, 400
+
+    try:
+        temp_path = _capture_selected_camera_snapshot_temp(camera_settings)
+    except RuntimeError as exc:
+        return {"error": str(exc)}, 500
+    except ValueError as exc:
+        payload, status = exc.args[0]
+        return payload, status
+    except web.camera.CameraCaptureError as exc:
+        return {"error": f"Snapshot failed: {exc}"}, 500
+    except subprocess.TimeoutExpired:
+        return {"error": "Snapshot timed out waiting for a camera frame. Wait for the camera to respond and try again."}, 504
     except OSError as err:
+        return {"error": f"Snapshot could not run ffmpeg: {err}"}, 500
+
+    @after_this_request
+    def _cleanup(response):
         try:
             os.remove(temp_path)
         except OSError:
             pass
-        return {"error": f"Snapshot could not run ffmpeg: {err}"}, 500
+        return response
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return send_file(
+        temp_path,
+        mimetype="image/jpeg",
+        as_attachment=True,
+        download_name=f"ankerctl_snapshot_{timestamp}.jpg",
+    )
 
 @app.get("/api/history")
 def app_api_history():
@@ -3235,7 +3417,7 @@ def app_api_timelapse_current_start():
             filename = mqtt.start_timelapse_for_current_print()
         except RuntimeError as exc:
             return {"error": str(exc)}, 409
-        state = mqtt.get_state()
+        state = _build_runtime_state_payload(mqtt)
     return {"status": "ok", "filename": filename, **state}
 
 
@@ -3245,7 +3427,7 @@ def app_api_timelapse_current_dismiss():
         if not mqtt:
             return {"error": "Service unavailable"}, 503
         mqtt.dismiss_timelapse_start_offer()
-        state = mqtt.get_state()
+        state = _build_runtime_state_payload(mqtt)
     return {"status": "ok", **state}
 
 
@@ -3578,6 +3760,7 @@ _PROTECTED_GET_PATHS = {
     "/api/debug/state",
     "/api/debug/logs",
     "/api/debug/services",
+    "/api/camera/frame",
     "/api/snapshot",
     # Sensitive credential exposure: HA MQTT password, Apprise URLs/keys
     "/api/settings/mqtt",

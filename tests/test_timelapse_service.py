@@ -12,6 +12,7 @@ class FakeConfigManager:
     def __init__(self, root, enabled=True):
         self.config_root = root
         self._cfg = SimpleNamespace(
+            printers=[SimpleNamespace(sn="SN1", name="Printer", model="V8111")],
             timelapse={
                 "enabled": enabled,
                 "interval": 5,
@@ -227,31 +228,33 @@ def test_timelapse_take_snapshot_retries_and_restores_light(monkeypatch, tmp_pat
     __import__("web").app.svc = SimpleNamespace(svcs={"videoqueue": videoqueue})
     __import__("web").app.config["api_key"] = "secret-key"
 
-    runs = []
+    captures = []
 
-    def fake_run(cmd, stdout=None, stderr=None, timeout=None):
-        runs.append(cmd)
-        frame_path = cmd[-1]
-        if len(runs) == 2:
-            with open(frame_path, "wb") as fh:
-                fh.write(b"jpg")
-            return SimpleNamespace(returncode=0)
-        return SimpleNamespace(returncode=1)
+    def fake_capture(camera_settings, ffmpeg_path, frame_path, **kwargs):
+        captures.append({
+            "camera_settings": camera_settings,
+            "ffmpeg_path": ffmpeg_path,
+            "frame_path": frame_path,
+            **kwargs,
+        })
+        with open(frame_path, "wb") as fh:
+            fh.write(b"jpg")
 
     try:
         monkeypatch.setattr("web.service.timelapse._resolve_ffmpeg_path", lambda: "resolved-ffmpeg")
         monkeypatch.setattr(TimelapseService, "_await_video_frame", lambda self: True)
-        monkeypatch.setattr("web.service.timelapse.subprocess.run", fake_run)
+        monkeypatch.setattr("web.camera.capture_camera_snapshot_to_file", fake_capture)
         monkeypatch.setattr("web.service.timelapse.time.sleep", lambda seconds: None)
         svc._take_snapshot()
     finally:
         __import__("web").app.svc = old_svc
         __import__("web").app.config["api_key"] = old_api_key
 
-    assert len(runs) == 2
-    assert runs[0][0] == "resolved-ffmpeg"
-    assert runs[1][0] == "resolved-ffmpeg"
-    assert any("apikey=secret-key" in part for part in runs[0] if isinstance(part, str))
+    assert len(captures) == 1
+    assert captures[0]["ffmpeg_path"] == "resolved-ffmpeg"
+    assert captures[0]["api_key"] == "secret-key"
+    assert captures[0]["for_timelapse"] is True
+    assert captures[0]["camera_settings"]["effective_source"] == "printer"
     assert light_calls == [True, False]
     assert svc._frame_count == 1
     assert os.path.exists(os.path.join(svc._current_dir, "frame_00000.jpg"))
@@ -394,13 +397,13 @@ def test_snapshot_timeout_requests_video_recovery(monkeypatch, tmp_path):
     web.app.svc = SimpleNamespace(svcs={"videoqueue": videoqueue})
     web.app.config["api_key"] = None
 
-    def fake_run(*args, **kwargs):
+    def fake_capture(*args, **kwargs):
         raise __import__("subprocess").TimeoutExpired(cmd="ffmpeg", timeout=10)
 
     try:
         monkeypatch.setattr("web.service.timelapse._resolve_ffmpeg_path", lambda: "resolved-ffmpeg")
         monkeypatch.setattr(TimelapseService, "_await_video_frame", lambda self: True)
-        monkeypatch.setattr("web.service.timelapse.subprocess.run", fake_run)
+        monkeypatch.setattr("web.camera.capture_camera_snapshot_to_file", fake_capture)
         monkeypatch.setattr("web.service.timelapse.time.sleep", lambda seconds: None)
         svc._take_snapshot()
     finally:
@@ -410,6 +413,60 @@ def test_snapshot_timeout_requests_video_recovery(monkeypatch, tmp_path):
     assert len(requests) == 1
     assert requests[0]["reason"] == "timelapse snapshot timed out waiting for a camera frame"
     assert requests[0]["force_pppp_recycle"] is True
+
+
+def test_timelapse_external_camera_snapshot_skips_printer_video_wait(monkeypatch, tmp_path):
+    cfg = FakeConfigManager(tmp_path)
+    cfg._cfg.camera = {
+        "per_printer": {
+            "SN1": {
+                "source": "external",
+                "external": {
+                    "name": "Workbench Cam",
+                    "snapshot_url": "http://cam.local/snapshot.jpg",
+                    "stream_url": "",
+                    "refresh_sec": 2,
+                },
+            }
+        }
+    }
+    svc = TimelapseService(cfg, captures_dir=tmp_path)
+    svc._current_dir = str(tmp_path / "capture")
+    svc._current_filename = "cube.gcode"
+    svc._frame_count = 0
+    os.makedirs(svc._current_dir, exist_ok=True)
+
+    captures = []
+    old_svc = web.app.svc
+    old_api_key = web.app.config.get("api_key")
+    web.app.svc = SimpleNamespace(svcs={})
+    web.app.config["api_key"] = "secret-key"
+
+    def fail_if_called(self):
+        raise AssertionError("_await_video_frame should not be called for external cameras")
+
+    def fake_capture(camera_settings, ffmpeg_path, frame_path, **kwargs):
+        captures.append({
+            "camera_settings": camera_settings,
+            "ffmpeg_path": ffmpeg_path,
+            **kwargs,
+        })
+        with open(frame_path, "wb") as fh:
+            fh.write(b"jpg")
+
+    try:
+        monkeypatch.setattr("web.service.timelapse._resolve_ffmpeg_path", lambda: "resolved-ffmpeg")
+        monkeypatch.setattr(TimelapseService, "_await_video_frame", fail_if_called)
+        monkeypatch.setattr("web.camera.capture_camera_snapshot_to_file", fake_capture)
+        svc._take_snapshot()
+    finally:
+        web.app.svc = old_svc
+        web.app.config["api_key"] = old_api_key
+
+    assert len(captures) == 1
+    assert captures[0]["camera_settings"]["effective_source"] == "external"
+    assert captures[0]["for_timelapse"] is False
+    assert svc._frame_count == 1
 
 
 def test_timelapse_runtime_state_reports_recovery(tmp_path):

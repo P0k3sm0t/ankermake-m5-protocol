@@ -1,5 +1,6 @@
 from contextlib import contextmanager
 from datetime import datetime
+from pathlib import Path
 import subprocess
 from types import SimpleNamespace
 
@@ -705,12 +706,62 @@ def test_snapshot_route_reports_expected_error_paths(monkeypatch):
     assert no_ffmpeg.status_code == 500
     assert no_service.status_code == 503
     assert video_disabled.status_code == 409
-    assert "Enable video" in video_disabled.get_json()["error"]
+    assert "Enable printer video" in video_disabled.get_json()["error"]
     assert no_frames.status_code == 409
     assert "no live camera frames" in no_frames.get_json()["error"]
     assert timeout.status_code == 504
     assert "timed out" in timeout.get_json()["error"]
     assert "Command" not in timeout.get_json()["error"]
+
+
+def test_snapshot_and_camera_frame_routes_support_external_camera(monkeypatch, tmp_path):
+    cfg = _base_config()
+    cfg.camera = {
+        "per_printer": {
+            "SN1": {
+                "source": "external",
+                "external": {
+                    "name": "Workbench Cam",
+                    "snapshot_url": "http://cam.local/snapshot.jpg",
+                    "stream_url": "",
+                    "refresh_sec": 2,
+                },
+            }
+        }
+    }
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(
+        config=cfg,
+        video_supported=False,
+        videoqueue=None,
+    )
+
+    captures = []
+
+    def fake_capture(camera_settings, ffmpeg_path, output_path, **kwargs):
+        captures.append({
+            "camera_settings": camera_settings,
+            "ffmpeg_path": ffmpeg_path,
+            **kwargs,
+        })
+        Path(output_path).write_bytes(b"jpeg")
+
+    monkeypatch.setattr("web._ffmpeg_path", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr("web.camera.capture_camera_snapshot_to_file", fake_capture)
+
+    try:
+        snapshot = client.get("/api/snapshot", headers={"X-Api-Key": API_KEY})
+        frame = client.get("/api/camera/frame", headers={"X-Api-Key": API_KEY})
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert snapshot.status_code == 200
+    assert frame.status_code == 200
+    assert snapshot.mimetype == "image/jpeg"
+    assert frame.mimetype == "image/jpeg"
+    assert len(captures) == 2
+    assert all(call["camera_settings"]["effective_source"] == "external" for call in captures)
+    assert all(call["ffmpeg_path"] == "/usr/bin/ffmpeg" for call in captures)
 
 
 def test_unsupported_device_guard_blocks_printer_control_routes():

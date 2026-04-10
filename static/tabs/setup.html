@@ -20,10 +20,24 @@
                         </button>
                     </li>
                     <li class="nav-item" role="presentation">
+                        <button class="nav-link" id="setup-camera-tab" data-bs-toggle="pill"
+                            data-bs-target="#setup-camera-pane" type="button" role="tab"
+                            aria-controls="setup-camera-pane" aria-selected="false">
+                            {{ macro.bi_icon("camera-video") }} Camera
+                        </button>
+                    </li>
+                    <li class="nav-item" role="presentation">
                         <button class="nav-link" id="setup-tools-tab" data-bs-toggle="pill"
                             data-bs-target="#setup-tools" type="button" role="tab" aria-controls="setup-tools"
                             aria-selected="false">
                             {{ macro.bi_icon("wrench-adjustable") }} Tools
+                        </button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link" id="setup-launcher-tab" data-bs-toggle="pill"
+                            data-bs-target="#setup-launcher-pane" type="button" role="tab"
+                            aria-controls="setup-launcher-pane" aria-selected="false">
+                            {{ macro.bi_icon("download") }} Launcher
                         </button>
                     </li>
                     <li class="nav-item" role="presentation">
@@ -33,7 +47,6 @@
                             {{ macro.bi_icon("bell") }} Notifications
                         </button>
                     </li>
-                    {% if video_supported %}
                     <li class="nav-item" role="presentation">
                         <button class="nav-link" id="setup-timelapse-tab" data-bs-toggle="pill"
                             data-bs-target="#setup-timelapse-pane" type="button" role="tab"
@@ -41,7 +54,6 @@
                             {{ macro.bi_icon("camera-reels") }} Timelapse
                         </button>
                     </li>
-                    {% endif %}
                     <li class="nav-item" role="presentation">
                         <button class="nav-link" id="setup-mqtt-tab" data-bs-toggle="pill"
                             data-bs-target="#setup-mqtt-pane" type="button" role="tab" aria-controls="setup-mqtt-pane"
@@ -272,6 +284,77 @@
                         </div>
                     </div>
 
+                    <!-- ===== CAMERA TAB ===== -->
+                    <div class="tab-pane fade" id="setup-camera-pane" role="tabpanel"
+                        aria-labelledby="setup-camera-tab">
+                        <div class="row g-3">
+                            <div class="col-lg-7">
+                                <div class="card">
+                                    <div class="card-header fs-4">External Camera Setup</div>
+                                    <div class="card-body">
+                                        <form id="camera-form" class="vstack gap-3">
+                                            <div class="row g-3">
+                                                <div class="col-md-6">
+                                                    <label class="form-label" for="camera-external-name">External camera label</label>
+                                                    <input class="form-control" type="text" id="camera-external-name"
+                                                        placeholder="Workbench Cam" />
+                                                </div>
+                                                <div class="col-md-6">
+                                                    <label class="form-label" for="camera-external-refresh">Preview refresh (seconds)</label>
+                                                    <input class="form-control" type="number" min="1" max="30"
+                                                        id="camera-external-refresh" value="3" />
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <label class="form-label" for="camera-external-stream-url">External stream URL</label>
+                                                <input class="form-control" type="text" id="camera-external-stream-url"
+                                                    placeholder="rtsp://user:pass@camera-ip:554/stream1" />
+                                                <div class="form-text">
+                                                    Use the main stream if the camera exposes RTSP, MJPEG, or another FFmpeg-readable feed.
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <label class="form-label" for="camera-external-snapshot-url">External snapshot URL</label>
+                                                <input class="form-control" type="text" id="camera-external-snapshot-url"
+                                                    placeholder="http://camera-ip/snapshot.jpg" />
+                                                <div class="form-text">
+                                                    Optional. If your camera provides a direct JPEG snapshot endpoint, use it here for faster previews and capture.
+                                                </div>
+                                            </div>
+                                            <div class="d-flex flex-wrap gap-2">
+                                                <button class="btn btn-primary" type="button" id="camera-save">Save External Camera</button>
+                                            </div>
+                                            <div class="form-text">
+                                                External camera settings are stored per printer, so each printer can use its own feed if needed.
+                                            </div>
+                                        </form>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-lg-5">
+                                <div class="card h-100">
+                                    <div class="card-header fs-4">Setup Notes</div>
+                                    <div class="card-body small">
+                                        <p class="mb-2">
+                                            External camera support is meant for simple FFmpeg-friendly feeds.
+                                        </p>
+                                        <ul class="mb-3">
+                                            <li>RTSP example: <code>rtsp://user:pass@camera-ip:554/stream1</code></li>
+                                            <li>MJPEG example: <code>http://camera-ip/mjpeg</code></li>
+                                            <li>Snapshot example: <code>http://camera-ip/snapshot.jpg</code></li>
+                                        </ul>
+                                        <p class="mb-2">
+                                            Use the <strong>Home</strong> page to switch between the printer camera and the external feed. Snapshot and timelapse follow that same source.
+                                        </p>
+                                        <p class="mb-0">
+                                            External preview updates as refreshed still frames rather than the low-latency PPPP stream used by the printer camera.
+                                        </p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                     <!-- ===== TOOLS TAB ===== -->
                     <div class="tab-pane fade" id="setup-tools" role="tabpanel" aria-labelledby="setup-tools-tab">
 
@@ -463,6 +546,58 @@
 
                     </div>
 
+                    <!-- ===== LAUNCHER TAB ===== -->
+                    <div class="tab-pane fade" id="setup-launcher-pane" role="tabpanel"
+                        aria-labelledby="setup-launcher-tab">
+                        <div class="row g-3">
+                            <div class="col-lg-7">
+                                <div class="card">
+                                    <div class="card-header fs-4">Windows Launcher</div>
+                                    <div class="card-body">
+                                        <div class="vstack gap-3">
+                                            <div>
+                                                <label class="form-label" for="launcher-install-dir">Ankerctl folder</label>
+                                                <input class="form-control" type="text" id="launcher-install-dir"
+                                                    value="{{ ankerctl_root }}"
+                                                    placeholder="C:\Users\YourName\Documents\GitHub\ankermake-m5-protocol" />
+                                                <div class="form-text">
+                                                    Enter the folder that contains <code>ankerctl.py</code>. The downloaded batch file will launch from this folder.
+                                                </div>
+                                            </div>
+                                            <div class="d-flex flex-wrap gap-2">
+                                                <button class="btn btn-primary" type="button" id="launcher-download-btn">
+                                                    {{ macro.bi_icon("download") }} Download Launcher .bat
+                                                </button>
+                                            </div>
+                                            <div class="form-text">
+                                                This launcher uses your path, changes into that folder, and runs <code>python .\ankerctl.py webserver run</code>.
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-lg-5">
+                                <div class="card h-100">
+                                    <div class="card-header fs-4">How To Use It</div>
+                                    <div class="card-body small">
+                                        <ol class="mb-3">
+                                            <li>Confirm the Ankerctl folder path.</li>
+                                            <li>Download the batch file.</li>
+                                            <li>Place it wherever you want on your PC.</li>
+                                            <li>Double-click it to start Ankerctl.</li>
+                                        </ol>
+                                        <p class="mb-2">
+                                            The batch file is generated specifically from the path you enter here, so you do not have to edit it afterward.
+                                        </p>
+                                        <p class="mb-0">
+                                            If you move the Ankerctl folder later, just come back here and download a fresh launcher.
+                                        </p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                     <!-- ===== NOTIFICATIONS TAB ===== -->
                     <div class="tab-pane fade" id="setup-notifications-pane" role="tabpanel"
                         aria-labelledby="setup-notifications-tab">
@@ -614,7 +749,6 @@
                     </div>
 
                     <!-- ===== TIMELAPSE TAB ===== -->
-                    {% if video_supported %}
                     <div class="tab-pane fade" id="setup-timelapse-pane" role="tabpanel"
                         aria-labelledby="setup-timelapse-tab">
                         <div class="card">
@@ -660,7 +794,6 @@
                             </div>
                         </div>
                     </div>
-                    {% endif %}
 
                     <!-- ===== MQTT / HOME ASSISTANT TAB ===== -->
                     <div class="tab-pane fade" id="setup-mqtt-pane" role="tabpanel" aria-labelledby="setup-mqtt-tab">
