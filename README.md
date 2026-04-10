@@ -32,7 +32,7 @@ The `ankerctl` program uses [`libflagship`](documentation/developer-docs/libflag
 
  - Automatic **timelapse** capture during prints — assembled into MP4 video at the end, now pauses on filament break/change (requires `ffmpeg`).
 
- - Live view of Ankerctl consel on home page.
+ - Live view of Ankerctl console on home page.
 
  - Filament indicator in printer stats.
 
