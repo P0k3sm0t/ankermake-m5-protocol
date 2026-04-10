@@ -118,31 +118,65 @@ $(function () {
         return `${size.toFixed(precision)} ${units[unit]}`;
     }
 
-    function flash_message(message, category = "info", timeout = 7500) {
+    function flash_message(message, category = "info", timeout = 7500, options = {}) {
         const messages = $("#messages");
         if (!messages.length) {
             console.log(`[${category}] ${message}`);
             return;
         }
+        const sticky = timeout === 0 || options.sticky === true;
+        const stickyKey = sticky ? String(options.key || "") : "";
+        if (stickyKey && _activeStickyAlerts.has(stickyKey)) {
+            return;
+        }
         const alert = $("<div>");
         alert.addClass(`alert alert-${category} alert-dismissible fade show`);
-        alert.attr("data-timeout", timeout);
         alert.attr("role", "alert");
+        if (!sticky) {
+            alert.attr("data-timeout", timeout);
+        } else if (stickyKey) {
+            _activeStickyAlerts.add(stickyKey);
+            alert.attr("data-sticky-key", stickyKey);
+        }
 
-        const closeBtn = $("<button>");
-        closeBtn.attr("type", "button");
-        closeBtn.addClass("btn-close btn-sm btn-close-white");
-        closeBtn.attr("data-bs-dismiss", "alert");
-        closeBtn.attr("aria-label", "Close");
+        const body = $("<div>");
+        body.addClass("d-flex align-items-center justify-content-between gap-3");
 
-        alert.append(closeBtn);
-        alert.append(document.createTextNode(message));
+        const messageText = $("<div>");
+        messageText.addClass("flex-grow-1");
+        messageText.text(String(message || ""));
+        body.append(messageText);
+
+        if (sticky) {
+            const ackBtn = $("<button>");
+            ackBtn.attr("type", "button");
+            ackBtn.addClass("btn btn-sm btn-light flex-shrink-0");
+            ackBtn.attr("data-bs-dismiss", "alert");
+            ackBtn.text("OK");
+            body.append(ackBtn);
+        } else {
+            const closeBtn = $("<button>");
+            closeBtn.attr("type", "button");
+            closeBtn.addClass("btn-close btn-sm btn-close-white flex-shrink-0");
+            closeBtn.attr("data-bs-dismiss", "alert");
+            closeBtn.attr("aria-label", "Close");
+            body.append(closeBtn);
+        }
+
+        alert.append(body);
         messages.append(alert);
 
         const bsalert = new bootstrap.Alert(alert[0]);
-        setTimeout(() => {
-            bsalert.close();
-        }, timeout);
+        if (stickyKey) {
+            alert.on("closed.bs.alert", function () {
+                _activeStickyAlerts.delete(stickyKey);
+            });
+        }
+        if (!sticky && timeout > 0) {
+            setTimeout(() => {
+                bsalert.close();
+            }, timeout);
+        }
     }
 
     /**
@@ -160,6 +194,8 @@ $(function () {
     const HOME_CONSOLE_INITIAL_LIMIT = 200;
     const HOME_CONSOLE_MAX_LINES = 400;
     const HOME_CONSOLE_POLL_MS = 2000;
+    const PRINTER_ALERT_POLL_MS = 4000;
+    const PRINTER_RUNTIME_POLL_MS = 5000;
 
     let _homeConsoleEntries = [];
     let _homeConsoleLastId = 0;
@@ -169,6 +205,11 @@ $(function () {
     let _homeConsoleAutoScrollPaused = false;
     let _homeConsoleClearedBeforeId = 0;
     let _homeConsoleWasCleared = false;
+    let _printerAlertLastId = 0;
+    let _printerAlertPollStarted = false;
+    let _printerRuntimeLoading = false;
+    let _printerRuntimePollInterval = null;
+    const _activeStickyAlerts = new Set();
 
     function setHomeConsoleStatus(message) {
         const status = $("#home-console-status");
@@ -420,6 +461,17 @@ $(function () {
         return "Changing";
     }
 
+    function getFilamentStateDetail(label, progress) {
+        if (label !== "Changing") {
+            return null;
+        }
+        const parsedProgress = Number(progress);
+        if (Number.isFinite(parsedProgress) && parsedProgress > 0 && parsedProgress < 100) {
+            return `Filament swap in progress (${Math.round(parsedProgress)}%)`;
+        }
+        return "Filament swap in progress";
+    }
+
     function isFilamentRunoutEvent(data) {
         if (!data || typeof data !== "object") {
             return false;
@@ -432,8 +484,26 @@ $(function () {
             && Number(data.value) === 6;
     }
 
-    function setFilamentState(label) {
+    const _filamentStatus = {
+        label: "Unknown",
+        detail: null,
+        issue: null,
+        pauseReason: null,
+        pendingRunout: false,
+    };
+    const _timelapseRuntime = {
+        capturing: false,
+        recovering: false,
+        detail: null,
+        promptStart: false,
+        promptFilename: null,
+        resumeAvailable: false,
+        resumeFrameCount: 0,
+    };
+
+    function setFilamentState(label, detail = null, detailTone = null) {
         const el = $("#filament-state");
+        const detailEl = $("#filament-state-detail");
         if (!el.length) {
             return;
         }
@@ -450,6 +520,232 @@ $(function () {
         } else {
             el.addClass("text-muted");
         }
+
+        if (detailEl.length) {
+            const detailText = String(detail || "").trim();
+            detailEl.removeClass("d-none text-danger text-warning text-muted text-success");
+            detailEl.text(detailText);
+            detailEl.toggleClass("d-none", !detailText);
+            if (detailText) {
+                detailEl.addClass(`text-${detailTone || "muted"}`);
+            }
+        }
+    }
+
+    function renderFilamentStatus() {
+        const pausedForFilament = _currentPrintState === PRINT_STATE.PAUSED && !!_filamentStatus.pauseReason;
+        const unverifiedFilamentState = _currentPrintState !== PRINT_STATE.PRINTING
+            && _currentPrintState !== PRINT_STATE.PAUSED
+            && _filamentStatus.label === "Loaded"
+            && !_filamentStatus.issue;
+        let label = _filamentStatus.label || "Unknown";
+        let detail = _filamentStatus.detail || null;
+        let detailTone = "muted";
+
+        if (unverifiedFilamentState) {
+            label = "Unknown";
+            detail = detail || "Filament presence cannot be confirmed until the printer starts printing.";
+            detailTone = "muted";
+        }
+        if (!detail && pausedForFilament && _filamentStatus.label === "Loaded") {
+            detail = "Filament loaded. Resume the print when ready.";
+            detailTone = "success";
+        }
+        if (!detail && pausedForFilament) {
+            detail = `Paused: ${_filamentStatus.pauseReason}`;
+            detailTone = "warning";
+        }
+        if (_filamentStatus.issue === "runout") {
+            detailTone = pausedForFilament ? "warning" : "danger";
+        } else if (label === "Changing") {
+            detailTone = "warning";
+        } else if (label === "Loaded" && detail) {
+            detailTone = "success";
+        }
+
+        setFilamentState(label, detail, detailTone);
+    }
+
+    function renderTimelapseRuntimeStatus() {
+        const el = $("#timelapse-runtime-detail");
+        if (!el.length) {
+            return;
+        }
+
+        const detailText = String(_timelapseRuntime.detail || "").trim();
+        el.removeClass("d-none text-warning text-muted text-success");
+        el.text(detailText);
+
+        if (!detailText) {
+            el.addClass("d-none");
+            return;
+        }
+
+        if (_timelapseRuntime.recovering) {
+            el.addClass("text-warning");
+        } else if (_timelapseRuntime.capturing) {
+            el.addClass("text-success");
+        } else {
+            el.addClass("text-muted");
+        }
+    }
+
+    function renderTimelapseActionCard() {
+        const card = document.getElementById("timelapse-action-card");
+        const title = document.getElementById("timelapse-action-title");
+        const detail = document.getElementById("timelapse-action-detail");
+        const startBtn = document.getElementById("timelapse-action-start");
+        const dismissBtn = document.getElementById("timelapse-action-dismiss");
+        if (!card || !title || !detail || !startBtn || !dismissBtn) {
+            return;
+        }
+
+        if (!_timelapseRuntime.promptStart || _timelapseRuntime.capturing) {
+            card.style.display = "none";
+            return;
+        }
+
+        const fileName = String(_timelapseRuntime.promptFilename || "this print").trim() || "this print";
+        const frameCount = Number(_timelapseRuntime.resumeFrameCount || 0);
+        const canResume = !!_timelapseRuntime.resumeAvailable && frameCount > 0;
+        title.textContent = canResume
+            ? "Resume timelapse for active print"
+            : "Start timelapse for active print";
+        detail.textContent = canResume
+            ? `${fileName} already has ${frameCount} saved frame${frameCount === 1 ? "" : "s"}. Continue or dismiss this pending capture.`
+            : `${fileName} is already printing. Continue or dismiss timelapse capture for this print.`;
+        startBtn.textContent = canResume ? "Continue Timelapse" : "Start Timelapse";
+        card.style.display = "";
+    }
+
+    async function sendTimelapseCurrentAction(endpoint, successMessage) {
+        const resp = await fetch(endpoint, { method: "POST" });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+            throw new Error(data.error || `HTTP ${resp.status}`);
+        }
+        applyRuntimeState(data);
+        if (successMessage) {
+            flash_message(successMessage, "success", 4000);
+        }
+    }
+
+    function applyRuntimeState(data) {
+        if (!data || typeof data !== "object") {
+            return;
+        }
+
+        const filament = data.filament || {};
+        _filamentStatus.label = String(filament.label || "Unknown");
+        _filamentStatus.detail = filament.detail || null;
+        _filamentStatus.issue = filament.issue || null;
+        _filamentStatus.pauseReason = filament.pause_reason_label || null;
+        _filamentStatus.pendingRunout = false;
+        const timelapse = data.timelapse || {};
+        _timelapseRuntime.capturing = !!timelapse.capturing;
+        _timelapseRuntime.recovering = !!timelapse.recovering;
+        _timelapseRuntime.detail = timelapse.detail || null;
+        _timelapseRuntime.promptStart = !!timelapse.prompt_start;
+        _timelapseRuntime.promptFilename = timelapse.prompt_filename || null;
+        _timelapseRuntime.resumeAvailable = !!timelapse.resume_available;
+        _timelapseRuntime.resumeFrameCount = Number(timelapse.resume_frame_count || 0);
+
+        if (data.print && data.print.state !== undefined) {
+            _updatePrintControlButtons(_normalizePrintStateValue(data.print.state));
+        }
+        renderFilamentStatus();
+        renderTimelapseRuntimeStatus();
+        renderTimelapseActionCard();
+    }
+
+    async function loadPrinterRuntimeState() {
+        if (_printerRuntimeLoading) {
+            return;
+        }
+        _printerRuntimeLoading = true;
+        try {
+            const resp = await fetch("/api/printer/runtime-state");
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) {
+                throw new Error(data.error || `HTTP ${resp.status}`);
+            }
+            applyRuntimeState(data);
+        } finally {
+            _printerRuntimeLoading = false;
+        }
+    }
+
+    function startPrinterRuntimePolling() {
+        loadPrinterRuntimeState().catch(function (err) {
+            console.warn("Failed to load printer runtime state", err);
+        });
+        if (_printerRuntimePollInterval) {
+            return;
+        }
+        _printerRuntimePollInterval = setInterval(function () {
+            loadPrinterRuntimeState().catch(function (err) {
+                console.warn("Failed to load printer runtime state", err);
+            });
+        }, PRINTER_RUNTIME_POLL_MS);
+    }
+
+    function getActivePrinterIndex() {
+        const raw = document.body ? document.body.dataset.activePrinterIndex : null;
+        const parsed = Number(raw);
+        if (Number.isFinite(parsed)) {
+            return parsed;
+        }
+        return 0;
+    }
+
+    function processPrinterAlertEntries(entries, notifyUser) {
+        if (!Array.isArray(entries) || !entries.length) {
+            return;
+        }
+        const activePrinterIndex = getActivePrinterIndex();
+        entries.forEach(function (entry) {
+            if (!notifyUser || !entry || Number(entry.printer_index) === activePrinterIndex) {
+                return;
+            }
+            const printerName = String(entry.printer_name || `Printer ${Number(entry.printer_index || 0) + 1}`);
+            const title = String(entry.title || "Printer alert");
+            const message = String(entry.message || title);
+            flash_message(`${printerName}: ${message}`, entry.level || "warning", 0, {
+                sticky: true,
+                key: `printer-alert:${Number(entry.printer_index || 0)}:${String(entry.type || title)}`,
+            });
+        });
+    }
+
+    async function pollPrinterAlerts() {
+        const params = new URLSearchParams({ limit: "20" });
+        if (_printerAlertLastId > 0) {
+            params.set("after", String(_printerAlertLastId));
+        }
+        const resp = await fetch(`/api/printer/alerts?${params.toString()}`);
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+            throw new Error(data.error || `HTTP ${resp.status}`);
+        }
+
+        const notifyUser = _printerAlertPollStarted;
+        processPrinterAlertEntries(data.entries || [], notifyUser);
+        _printerAlertLastId = data.last_id || _printerAlertLastId;
+        _printerAlertPollStarted = true;
+    }
+
+    function startPrinterAlertPolling() {
+        if (!document.getElementById("messages")) {
+            return;
+        }
+        pollPrinterAlerts().catch(function (err) {
+            console.warn("Failed to poll printer alerts", err);
+        });
+        setInterval(function () {
+            pollPrinterAlerts().catch(function (err) {
+                console.warn("Failed to poll printer alerts", err);
+            });
+        }, PRINTER_ALERT_POLL_MS);
     }
 
     /**
@@ -731,8 +1027,41 @@ $(function () {
                 return;
             }
             if (data.commandType == 1000) {
+                if (Number(data.subType) === 2 && Number(data.value) === 6) {
+                    _filamentStatus.pendingRunout = false;
+                    _filamentStatus.label = "Not Loaded";
+                    _filamentStatus.detail = _currentPrintState === PRINT_STATE.PAUSED
+                        ? "Paused: Filament runout. Reload filament to continue."
+                        : "Filament runout or break detected.";
+                    _filamentStatus.issue = "runout";
+                    _filamentStatus.pauseReason = "Filament runout";
+                    renderFilamentStatus();
+                    return;
+                }
                 // Printer state machine: normalize firmware resume acknowledgements for UI controls.
-                _updatePrintControlButtons(_normalizePrintStateValue(data.value));
+                const normalizedState = _normalizePrintStateValue(data.value);
+                const wasPausedForFilament = _currentPrintState === PRINT_STATE.PAUSED
+                    && !!_filamentStatus.pauseReason
+                    && _filamentStatus.issue === "runout";
+                if (normalizedState === PRINT_STATE.PAUSED && _filamentStatus.pendingRunout && _filamentStatus.issue !== "runout") {
+                    _filamentStatus.pendingRunout = false;
+                    _filamentStatus.label = "Not Loaded";
+                    _filamentStatus.detail = "Paused: Filament runout. Reload filament to continue.";
+                    _filamentStatus.issue = "runout";
+                    _filamentStatus.pauseReason = "Filament runout";
+                }
+                if (normalizedState === PRINT_STATE.PRINTING && wasPausedForFilament) {
+                    _filamentStatus.label = "Loaded";
+                    _filamentStatus.detail = null;
+                    _filamentStatus.issue = null;
+                }
+                if (normalizedState !== PRINT_STATE.PAUSED) {
+                    _filamentStatus.pauseReason = null;
+                    if (_filamentStatus.issue !== "runout") {
+                        _filamentStatus.pendingRunout = false;
+                    }
+                }
+                _updatePrintControlButtons(normalizedState);
                 if (typeof _onMqttStateChange === "function") {
                     _onMqttStateChange(data.value);
                 }
@@ -795,10 +1124,38 @@ $(function () {
                 }
             } else if (data.commandType == 1021) {
                 applyZOffsetState(data, { populateTarget: false });
+            } else if (data.commandType == 1085 && String(data.errorCode || "") === "0xFF01030001") {
+                _filamentStatus.pendingRunout = true;
+            } else if (data.commandType == 1086 && String(data.errorCode || "") === "0xFF01030001") {
+                if (_filamentStatus.issue !== "runout") {
+                    _filamentStatus.pendingRunout = false;
+                }
             } else if (isFilamentRunoutEvent(data)) {
-                setFilamentState("Not Loaded");
+                _filamentStatus.pendingRunout = false;
+                _filamentStatus.label = "Not Loaded";
+                _filamentStatus.detail = _currentPrintState === PRINT_STATE.PAUSED
+                    ? "Paused: Filament runout. Reload filament to continue."
+                    : "Filament runout or break detected.";
+                _filamentStatus.issue = "runout";
+                _filamentStatus.pauseReason = "Filament runout";
+                renderFilamentStatus();
             } else if (data.commandType == 1023) {
-                setFilamentState(getFilamentStateLabel(data.value, data.progress, data.stepLen));
+                const label = getFilamentStateLabel(data.value, data.progress, data.stepLen);
+                const inFilamentRunoutPause = _currentPrintState === PRINT_STATE.PAUSED
+                    && !!_filamentStatus.pauseReason
+                    && _filamentStatus.issue === "runout";
+                if (inFilamentRunoutPause && label === "Loaded") {
+                    _filamentStatus.label = "Not Loaded";
+                    _filamentStatus.detail = null;
+                } else {
+                    _filamentStatus.label = label;
+                    _filamentStatus.detail = getFilamentStateDetail(label, data.progress);
+                }
+                if (!inFilamentRunoutPause && (label === "Changing" || label === "Loaded")) {
+                    _filamentStatus.issue = null;
+                    _filamentStatus.pendingRunout = false;
+                }
+                renderFilamentStatus();
             } else if (data.commandType == 1044) {
                 // Print start notification — extract basename from filePath
                 const filePath = data.filePath || "";
@@ -826,7 +1183,12 @@ $(function () {
             $("#set-bed-temp").val(0);
             $("#print-speed").text("0mm/s");
             $("#print-layer").text("0 / 0");
-            setFilamentState("Unknown");
+            _filamentStatus.label = "Unknown";
+            _filamentStatus.detail = null;
+            _filamentStatus.issue = null;
+            _filamentStatus.pauseReason = null;
+            _filamentStatus.pendingRunout = false;
+            renderFilamentStatus();
             document.title = "ankerctl";
             _updatePrintControlButtons(PRINT_STATE.IDLE);
             _zOffsetCurrentMm = null;
@@ -1106,6 +1468,7 @@ $(function () {
     if ($("#upload-progressbar").length) {
         sockets.upload.connect();
     }
+    startPrinterRuntimePolling();
 
     sockets.video.autoReconnect = false;
 
@@ -1707,6 +2070,11 @@ $(function () {
         $("#print-pause").prop("disabled", stopping);
         $("#print-resume").prop("disabled", stopping);
         $("#print-stop").prop("disabled", stopping);
+        updateGCodeStorageControls();
+        if (!isGCodeStorageLocked()) {
+            maybeRefreshGCodeStorageAfterUnlock();
+        }
+        renderFilamentStatus();
     }
 
     const getStepDist = () => $('input[name="step-dist"]:checked').val() || "1";
@@ -2398,6 +2766,22 @@ $(function () {
     }
 
     let _selectedGCodeStorageFile = null;
+    let _gcodeStorageLoading = false;
+    let _gcodeStorageRefreshDeferred = false;
+
+    function isGCodeStorageLocked() {
+        const normalizedState = _normalizePrintStateValue(_currentPrintState);
+        return normalizedState === PRINT_STATE.PRINTING
+            || normalizedState === PRINT_STATE.PAUSED
+            || normalizedState === PRINT_STATE.CALIBRATING
+            || normalizedState === PRINT_STATE.STOPPING
+            || normalizedState === PRINT_STATE.PENDING_START;
+    }
+
+    function isGCodeTabVisible() {
+        const pane = document.getElementById("gcode");
+        return !!(pane && pane.classList.contains("show"));
+    }
 
     function buildGCodeThumbnail(url, altText) {
         const safeAlt = escapeHtml(altText || "GCode thumbnail");
@@ -2422,13 +2806,37 @@ $(function () {
     }
 
     function setGCodeStoragePrintEnabled(enabled) {
-        $("#gcode-storage-print").prop("disabled", !enabled);
+        $("#gcode-storage-print").prop("disabled", !enabled || _gcodeStorageLoading || isGCodeStorageLocked());
     }
 
     function setGCodeStorageBusy(busy) {
-        $("#gcode-storage-refresh").prop("disabled", busy);
-        $("#gcode-storage-source").prop("disabled", busy);
-        $("#gcode-storage-print").prop("disabled", busy || !_selectedGCodeStorageFile);
+        _gcodeStorageLoading = busy;
+        updateGCodeStorageControls();
+    }
+
+    function updateGCodeStorageControls() {
+        const busy = _gcodeStorageLoading;
+        const locked = isGCodeStorageLocked();
+        $("#gcode-storage-refresh").prop("disabled", busy || locked);
+        $("#gcode-storage-source").prop("disabled", busy || locked);
+        $("#gcode-storage-print").prop("disabled", busy || locked || !_selectedGCodeStorageFile);
+        $("#gcode-storage-lock-note").toggleClass("d-none", !locked);
+    }
+
+    function deferGCodeStorageRefresh(message) {
+        _gcodeStorageRefreshDeferred = true;
+        updateGCodeStorageControls();
+        if (message) {
+            $("#gcode-storage-status").text(message);
+        }
+    }
+
+    function maybeRefreshGCodeStorageAfterUnlock() {
+        if (!_gcodeStorageRefreshDeferred || _gcodeStorageLoading || isGCodeStorageLocked() || !isGCodeTabVisible()) {
+            return;
+        }
+        _gcodeStorageRefreshDeferred = false;
+        loadGCodeStorageFiles();
     }
 
     function renderGCodeStorageSelection(file) {
@@ -2518,8 +2926,15 @@ $(function () {
     async function loadGCodeStorageFiles() {
         const source = $("#gcode-storage-source").val() || "onboard";
         const status = $("#gcode-storage-status");
+        const lockedMessage = `File list is paused while the printer is busy. It will refresh after the print stops.`;
+
+        if (isGCodeStorageLocked()) {
+            deferGCodeStorageRefresh(lockedMessage);
+            return;
+        }
 
         setGCodeStorageBusy(true);
+        _gcodeStorageRefreshDeferred = false;
         status.text(`Loading ${gcodeStorageSourceLabel(source)} files...`);
         try {
             const resp = await fetch(`/api/files/printer?source=${encodeURIComponent(source)}`);
@@ -2527,8 +2942,16 @@ $(function () {
             if (!resp.ok) {
                 throw new Error(data.error || `HTTP ${resp.status}`);
             }
+            if (isGCodeStorageLocked()) {
+                deferGCodeStorageRefresh(lockedMessage);
+                return;
+            }
             renderGCodeStorageFiles(source, data.files || []);
         } catch (err) {
+            if (isGCodeStorageLocked()) {
+                deferGCodeStorageRefresh(lockedMessage);
+                return;
+            }
             $("#gcode-storage-list").html(
                 `<div class="list-group-item text-danger small">Failed to load ${escapeHtml(gcodeStorageSourceLabel(source))}: ${escapeHtml(err.message)}</div>`
             );
@@ -2679,6 +3102,12 @@ $(function () {
             flash_message("Select a stored file before printing.", "warning");
             return;
         }
+        if (isGCodeStorageLocked()) {
+            gcodeLog("Stored file actions are paused while the printer is busy");
+            flash_message("The printer is busy right now. Wait for it to return to idle before browsing or starting another stored file.", "warning");
+            deferGCodeStorageRefresh("File list is paused while the printer is busy. It will refresh after the print stops.");
+            return;
+        }
 
         const source = _selectedGCodeStorageFile.source || $("#gcode-storage-source").val() || "onboard";
         const fileName = _selectedGCodeStorageFile.name || "stored file";
@@ -2729,6 +3158,9 @@ $(function () {
             loadGCodeStorageFiles();
         });
     }
+
+    updateGCodeStorageControls();
+    startPrinterAlertPolling();
 
     $("#print-pause").on("click", function () {
         sendPrintControl(PRINT_CONTROL.PAUSE);
@@ -3165,6 +3597,9 @@ $(function () {
     let _timelapseInterval = null;
     if (timelapseTabBtn) {
         timelapseTabBtn.addEventListener("shown.bs.tab", function () {
+            loadPrinterRuntimeState().catch(function (err) {
+                console.warn("Failed to refresh timelapse runtime state", err);
+            });
             loadTimelapses();
             if (!_timelapseInterval) {
                 _timelapseInterval = setInterval(loadTimelapses, 15000);
@@ -3177,6 +3612,31 @@ $(function () {
             }
         });
     }
+
+    $("#timelapse-action-start").on("click", async function () {
+        const btn = $(this);
+        const fileName = String(_timelapseRuntime.promptFilename || "this print").trim() || "this print";
+        btn.prop("disabled", true);
+        try {
+            await sendTimelapseCurrentAction("/api/timelapse/current/start", `Timelapse started for ${fileName}.`);
+        } catch (err) {
+            flash_message(`Timelapse start failed: ${err.message || err}`, "danger", 6000);
+        } finally {
+            btn.prop("disabled", false);
+        }
+    });
+
+    $("#timelapse-action-dismiss").on("click", async function () {
+        const btn = $(this);
+        btn.prop("disabled", true);
+        try {
+            await sendTimelapseCurrentAction("/api/timelapse/current/dismiss", "Pending timelapse capture dismissed.");
+        } catch (err) {
+            flash_message(`Dismiss failed: ${err.message || err}`, "danger", 6000);
+        } finally {
+            btn.prop("disabled", false);
+        }
+    });
 
     // Delete timelapse (list button or player delete button)
     $(document).on("click", ".timelapse-delete", function () {

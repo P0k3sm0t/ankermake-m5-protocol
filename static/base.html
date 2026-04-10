@@ -13,7 +13,7 @@
     {%- block head %}{% endblock head %}
 </head>
 
-<body>
+<body data-active-printer-index="{{ active_printer_index|default(0) }}">
     <!-- Header -->
     <div class="bg-dark bg-gradient mb-3">
         <header class="container d-flex align-items-center py-2">

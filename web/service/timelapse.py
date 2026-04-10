@@ -20,6 +20,8 @@ _SNAPSHOT_TIMEOUT = 10
 _RESUME_WINDOW_SEC = 60 * 60  # 60 minutes
 _IN_PROGRESS_SUBDIR = "in_progress"
 _MAX_ORPHAN_AGE_SEC = 24 * 3600  # 24 hours
+_RECOVERY_REQUEST_COOLDOWN_SEC = 8.0
+_RECOVERY_WAIT_SEC = 4.0
 
 
 def _resolve_ffmpeg_path():
@@ -49,6 +51,10 @@ class TimelapseService:
         self._current_dir = None
         self._current_filename = None
         self._frame_count = 0
+        self._capture_pause_reason = None
+        self._last_recovery_request_at = 0.0
+        self._recovery_active = False
+        self._recovery_reason = None
 
         # Set defaults to ensure attributes exist even if config is None
         self._enabled = False
@@ -104,6 +110,64 @@ class TimelapseService:
     @property
     def enabled(self):
         return self._enabled
+
+    def get_runtime_state(self):
+        with self._lock:
+            capture_thread = self._capture_thread
+            return {
+                "enabled": self._enabled,
+                "capturing": bool(capture_thread and capture_thread.is_alive()),
+                "paused": self._capture_pause_reason is not None,
+                "pause_reason": self._capture_pause_reason,
+                "recovering": self._recovery_active,
+                "recovery_reason": self._recovery_reason,
+                "resume_available": bool(self._resume_dir),
+                "resume_filename": self._resume_filename,
+                "resume_frame_count": self._resume_frame_count,
+                "detail": self._runtime_detail(),
+            }
+
+    def _runtime_detail(self):
+        if self._recovery_active:
+            return "Recovering video stream..."
+        if self._capture_pause_reason == "filament_runout":
+            return "Paused for filament runout."
+        if self._capture_pause_reason == "filament_change":
+            return "Paused for filament change."
+        return None
+
+    def _set_recovery_state(self, active, reason=None):
+        recovery_reason = str(reason or "").strip() or None
+        with self._lock:
+            changed = (
+                self._recovery_active != bool(active)
+                or self._recovery_reason != recovery_reason
+            )
+            self._recovery_active = bool(active)
+            self._recovery_reason = recovery_reason if active else None
+        if not changed:
+            return
+        if active and recovery_reason:
+            log.info(f"Timelapse: recovery active ({recovery_reason})")
+        elif active:
+            log.info("Timelapse: recovery active")
+        else:
+            log.info("Timelapse: recovery cleared")
+
+    def set_capture_paused(self, paused, reason=None):
+        pause_reason = str(reason or "paused").strip() if paused else None
+        with self._lock:
+            if self._capture_pause_reason == pause_reason:
+                return
+            self._capture_pause_reason = pause_reason
+        if pause_reason:
+            log.info(f"Timelapse: capture paused ({pause_reason})")
+        else:
+            log.info("Timelapse: capture resumed")
+
+    def is_capture_paused(self):
+        with self._lock:
+            return self._capture_pause_reason is not None
 
     def _enable_video_for_timelapse(self):
         """Start video streaming for timelapse capture if not already active."""
@@ -175,19 +239,67 @@ class TimelapseService:
         from web import app
         vq = app.svc.svcs.get("videoqueue")
         if not vq or not hasattr(vq, "last_frame_at"):
+            self._set_recovery_state(False)
             return True
         now = time.monotonic()
-        last_frame = getattr(vq, "last_frame_at", None)
-        if last_frame and (now - last_frame) <= max_age:
+        if self._has_recent_video_frame(vq, now=now, max_age=max_age):
+            self._set_recovery_state(False)
             return True
         deadline = now + timeout
         while time.monotonic() < deadline:
-            last_frame = getattr(vq, "last_frame_at", None)
-            if last_frame and (time.monotonic() - last_frame) <= max_age:
+            if self._has_recent_video_frame(vq, max_age=max_age):
+                self._set_recovery_state(False)
                 return True
             time.sleep(0.1)
+        requested = self._request_video_recovery(
+            "timelapse has no recent video frame",
+            force_pppp_recycle=not bool(getattr(getattr(vq, "pppp", None), "connected", False)),
+        )
+        if requested:
+            recovery_deadline = time.monotonic() + _RECOVERY_WAIT_SEC
+            while time.monotonic() < recovery_deadline:
+                if self._has_recent_video_frame(vq, max_age=max_age):
+                    self._set_recovery_state(False)
+                    log.info("Timelapse: video frame recovered after restart request")
+                    return True
+                time.sleep(0.1)
         log.debug("Timelapse: _await_video_frame timed out")
         return False
+
+    @staticmethod
+    def _has_recent_video_frame(vq, now=None, max_age=1.5):
+        last_frame = getattr(vq, "last_frame_at", None)
+        if not last_frame:
+            return False
+        now = time.monotonic() if now is None else now
+        return (now - last_frame) <= max_age
+
+    def _request_video_recovery(self, reason, force_pppp_recycle=False):
+        from web import app
+
+        vq = app.svc.svcs.get("videoqueue")
+        if not vq:
+            return False
+
+        request_recovery = getattr(vq, "request_live_recovery", None)
+        if not callable(request_recovery):
+            return False
+
+        now = time.monotonic()
+        if (now - self._last_recovery_request_at) < _RECOVERY_REQUEST_COOLDOWN_SEC:
+            return False
+
+        requested = bool(
+            request_recovery(
+                reason=reason,
+                force_pppp_recycle=force_pppp_recycle,
+            )
+        )
+        if requested:
+            self._last_recovery_request_at = now
+            self._set_recovery_state(True, reason)
+            log.info(f"Timelapse: requested video recovery ({reason})")
+        return requested
 
     def _cancel_finalize_timer(self):
         """Cancel any pending delayed assembly timer."""
@@ -207,6 +319,27 @@ class TimelapseService:
             self._resume_dir = None
             self._resume_filename = None
             self._resume_frame_count = 0
+
+    def discard_pending_resume(self, filename=None):
+        """Discard a pending resumable capture, optionally scoped by filename."""
+        with self._lock:
+            if self._capture_thread and self._capture_thread.is_alive():
+                return False
+
+            requested = os.path.basename(str(filename or "")).strip() or None
+            current = os.path.basename(str(self._resume_filename or "")).strip() or None
+            if requested and current and requested != current:
+                return False
+            if not self._resume_dir:
+                return False
+
+            log.info(f"Timelapse: discarded pending capture for '{self._resume_filename}'")
+            self._cancel_pending_resume()
+            self._capture_pause_reason = None
+            self._recovery_active = False
+            self._recovery_reason = None
+            self._disable_video_for_timelapse()
+            return True
 
     def _schedule_finalize(self, dir_path, filename, frame_count, suffix=""):
         """Save capture state and schedule delayed assembly.
@@ -272,6 +405,10 @@ class TimelapseService:
 
         with self._lock:
             self._stop_capture_thread()
+            self._capture_pause_reason = None
+            self._last_recovery_request_at = 0.0
+            self._recovery_active = False
+            self._recovery_reason = None
 
             # Check if we can seamlessly resume a previous capture of the same print
             can_resume = (
@@ -333,6 +470,9 @@ class TimelapseService:
         assemble_frame_count = 0
         with self._lock:
             self._stop_capture_thread()
+            self._capture_pause_reason = None
+            self._recovery_active = False
+            self._recovery_reason = None
             if not self._current_dir:
                 if not self._resume_dir:
                     self._disable_video_for_timelapse()
@@ -383,6 +523,9 @@ class TimelapseService:
         assemble_frame_count = 0
         with self._lock:
             self._stop_capture_thread()
+            self._capture_pause_reason = None
+            self._recovery_active = False
+            self._recovery_reason = None
             self._cancel_pending_resume()
             if self._current_dir and self._frame_count >= 2:
                 log.info("Timelapse: print failed, assembling partial timelapse")
@@ -407,12 +550,15 @@ class TimelapseService:
         if self._capture_thread and self._capture_thread.is_alive():
             self._stop_event.set()
             self._capture_thread.join(timeout=5)
-            self._capture_thread = None
+        self._capture_thread = None
 
     def _capture_loop(self):
         """Periodically capture snapshots from the video stream."""
         try:
             while not self._stop_event.is_set():
+                if self.is_capture_paused():
+                    self._stop_event.wait(min(self._interval, 1.0))
+                    continue
                 try:
                     self._take_snapshot()
                 except Exception as err:
@@ -486,6 +632,7 @@ class TimelapseService:
                 )
 
             if result.returncode == 0 and os.path.exists(frame_path) and os.path.getsize(frame_path) > 0:
+                self._set_recovery_state(False)
                 self._frame_count += 1
                 self._write_meta(self._current_dir, self._current_filename, self._frame_count)
             else:
@@ -498,12 +645,17 @@ class TimelapseService:
                     log.warning(f"Timelapse: snapshot failed: {stderr}")
                 else:
                     log.warning("Timelapse: snapshot failed")
+                self._request_video_recovery("timelapse snapshot failed to decode live stream")
         except subprocess.TimeoutExpired:
             try:
                 os.remove(frame_path)
             except OSError:
                 pass
             log.warning("Timelapse: snapshot timed out waiting for a camera frame")
+            self._request_video_recovery(
+                "timelapse snapshot timed out waiting for a camera frame",
+                force_pppp_recycle=True,
+            )
         except OSError as err:
             try:
                 os.remove(frame_path)

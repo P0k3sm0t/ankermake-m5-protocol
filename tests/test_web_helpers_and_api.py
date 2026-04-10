@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 from cli.model import Account, Config, Printer
 from libflagship import resolve_root_dir
-from web import _AccessLogNoiseFilter, _ConsoleLogBuffer
+from web import _AccessLogNoiseFilter, _ConsoleLogBuffer, _PrinterAlertBuffer
 from web import (
     _build_command_group,
     _build_filament_move_gcode,
@@ -222,6 +222,30 @@ def test_console_log_buffer_supports_recent_tail_and_incremental_updates():
     assert truncated["truncated"] is True
 
 
+def test_printer_alert_buffer_supports_recent_tail_and_incremental_updates():
+    buffer = _PrinterAlertBuffer(max_entries=3)
+    for idx in range(1, 6):
+        buffer.append(
+            printer_index=0,
+            printer_name="Thing 1",
+            alert_type="filament_runout",
+            title="Filament runout",
+            message=f"alert {idx}",
+            cooldown_sec=0,
+        )
+
+    recent = buffer.snapshot(limit=10)
+    incremental = buffer.snapshot(after_id=3, limit=10)
+    truncated = buffer.snapshot(after_id=1, limit=10)
+
+    assert [entry["message"] for entry in recent["entries"]] == ["alert 3", "alert 4", "alert 5"]
+    assert recent["first_id"] == 3
+    assert recent["last_id"] == 5
+    assert [entry["message"] for entry in incremental["entries"]] == ["alert 4", "alert 5"]
+    assert incremental["truncated"] is False
+    assert truncated["truncated"] is True
+
+
 def test_access_log_noise_filter_suppresses_console_polling_and_static_assets():
     filt = _AccessLogNoiseFilter()
 
@@ -235,6 +259,11 @@ def test_access_log_noise_filter_suppresses_console_polling_and_static_assets():
         msg='127.0.0.1 - - [08/Apr/2026 17:57:47] "GET /static/ankersrv.js HTTP/1.1" 304 -',
         args=(), exc_info=None,
     )
+    runtime_record = logging.LogRecord(
+        name="werkzeug", level=logging.INFO, pathname=__file__, lineno=0,
+        msg='127.0.0.1 - - [09/Apr/2026 10:15:00] "GET /api/printer/runtime-state HTTP/1.1" 200 -',
+        args=(), exc_info=None,
+    )
     api_record = logging.LogRecord(
         name="werkzeug", level=logging.INFO, pathname=__file__, lineno=0,
         msg='127.0.0.1 - - [08/Apr/2026 17:57:47] "GET /api/health HTTP/1.1" 200 -',
@@ -243,6 +272,7 @@ def test_access_log_noise_filter_suppresses_console_polling_and_static_assets():
 
     assert filt.filter(console_record) is False
     assert filt.filter(static_record) is False
+    assert filt.filter(runtime_record) is False
     assert filt.filter(api_record) is True
 
 
@@ -341,6 +371,149 @@ def test_api_printers_and_switch_active_printer(monkeypatch):
         app.svc = old_svc
         for key, value in old_values.items():
             app.config[key] = value
+
+
+def test_api_printer_runtime_state_returns_filament_details():
+    mqtt = SimpleNamespace(
+        get_state=lambda: {
+            "print": {
+                "print_state": "paused",
+                "state": 2,
+                "pause_reason": "filament_runout",
+                "pause_reason_label": "Filament runout",
+            },
+            "filament": {
+                "state": "not_loaded",
+                "label": "Not Loaded",
+                "issue": "runout",
+                "issue_label": "Filament runout",
+                "detail": "Paused: Filament runout. Reload filament to continue.",
+                "pause_reason": "filament_runout",
+                "pause_reason_label": "Filament runout",
+            },
+            "timelapse": {
+                "enabled": True,
+                "capturing": True,
+                "recovering": True,
+                "recovery_reason": "timelapse has no recent video frame",
+                "detail": "Recovering video stream...",
+            },
+        }
+    )
+    client = app.test_client()
+    old_values = {
+        "login": app.config.get("login"),
+        "api_key": app.config.get("api_key"),
+    }
+    old_svc = app.svc
+
+    app.config["login"] = True
+    app.config["api_key"] = None
+    app.svc = FakeServices(mqtt)
+
+    try:
+        response = client.get("/api/printer/runtime-state")
+    finally:
+        app.svc = old_svc
+        for key, value in old_values.items():
+            app.config[key] = value
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["status"] == "ok"
+    assert data["print"]["pause_reason_label"] == "Filament runout"
+    assert data["filament"]["issue"] == "runout"
+    assert data["filament"]["detail"] == "Paused: Filament runout. Reload filament to continue."
+    assert data["timelapse"]["recovering"] is True
+    assert data["timelapse"]["detail"] == "Recovering video stream..."
+
+
+def test_api_timelapse_current_start_and_dismiss():
+    calls = []
+    mqtt = SimpleNamespace(
+        start_timelapse_for_current_print=lambda: calls.append("start") or "cube.gcode",
+        dismiss_timelapse_start_offer=lambda: calls.append("dismiss"),
+        get_state=lambda: {
+            "print": {
+                "print_state": "printing",
+                "state": 1,
+            },
+            "timelapse": {
+                "enabled": True,
+                "capturing": "start" in calls,
+                "prompt_start": "dismiss" not in calls and "start" not in calls,
+                "prompt_filename": "cube.gcode",
+            },
+        },
+    )
+    client = app.test_client()
+    old_values = {
+        "login": app.config.get("login"),
+        "api_key": app.config.get("api_key"),
+    }
+    old_svc = app.svc
+
+    app.config["login"] = True
+    app.config["api_key"] = None
+    app.svc = FakeServices(mqtt)
+
+    try:
+        start_response = client.post("/api/timelapse/current/start")
+        dismiss_response = client.post("/api/timelapse/current/dismiss")
+    finally:
+        app.svc = old_svc
+        for key, value in old_values.items():
+            app.config[key] = value
+
+    assert start_response.status_code == 200
+    assert dismiss_response.status_code == 200
+    assert calls == ["start", "dismiss"]
+    assert start_response.get_json()["filename"] == "cube.gcode"
+    assert start_response.get_json()["timelapse"]["capturing"] is True
+    assert dismiss_response.get_json()["timelapse"]["prompt_start"] is False
+
+
+def test_api_printer_alerts_returns_recent_entries(monkeypatch):
+    calls = []
+
+    class FakeAlertBuffer:
+        def snapshot(self, *, limit=20, after_id=None):
+            calls.append((limit, after_id))
+            return {
+                "entries": [{
+                    "id": 9,
+                    "printer_index": 0,
+                    "printer_name": "Thing 1",
+                    "type": "filament_runout",
+                    "title": "Filament runout",
+                    "message": "Filament runout or break detected.",
+                    "level": "warning",
+                }],
+                "first_id": 9,
+                "last_id": 9,
+                "next_after": 9,
+                "truncated": False,
+                "max_entries": 100,
+            }
+
+    client = app.test_client()
+    old_values = {
+        "login": app.config.get("login"),
+        "api_key": app.config.get("api_key"),
+    }
+    app.config["login"] = True
+    app.config["api_key"] = None
+    monkeypatch.setattr(web_module, "_get_printer_alert_buffer", lambda: FakeAlertBuffer())
+
+    try:
+        response = client.get("/api/printer/alerts?limit=15&after=3")
+    finally:
+        for key, value in old_values.items():
+            app.config[key] = value
+
+    assert response.status_code == 200
+    assert response.get_json()["entries"][0]["title"] == "Filament runout"
+    assert calls == [(15, 3)]
 
 
 def test_root_shows_ffmpeg_warning_only_for_camera_capable_devices(monkeypatch):

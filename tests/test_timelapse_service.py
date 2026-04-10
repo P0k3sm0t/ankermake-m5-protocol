@@ -4,6 +4,7 @@ import time
 from contextlib import contextmanager
 from types import SimpleNamespace
 
+import web
 from web.service.timelapse import TimelapseService, _IN_PROGRESS_SUBDIR, _resolve_ffmpeg_path
 
 
@@ -191,6 +192,25 @@ def test_timelapse_start_capture_resumes_pending_session(monkeypatch, tmp_path):
     assert calls == ["stop-thread", "cancel-finalize", "enable-video", "thread-start"]
 
 
+def test_timelapse_discard_pending_resume(tmp_path):
+    cfg = FakeConfigManager(tmp_path)
+    svc = TimelapseService(cfg, captures_dir=tmp_path)
+    resume_dir = tmp_path / _IN_PROGRESS_SUBDIR / "resume_discard"
+    resume_dir.mkdir(parents=True, exist_ok=True)
+    (resume_dir / "frame_00000.jpg").write_bytes(b"x")
+    svc._resume_dir = str(resume_dir)
+    svc._resume_filename = "cube.gcode"
+    svc._resume_frame_count = 1
+
+    discarded = svc.discard_pending_resume("cube.gcode")
+
+    assert discarded is True
+    assert svc._resume_dir is None
+    assert svc._resume_filename is None
+    assert svc._resume_frame_count == 0
+    assert not resume_dir.exists()
+
+
 def test_timelapse_take_snapshot_retries_and_restores_light(monkeypatch, tmp_path):
     cfg = FakeConfigManager(tmp_path)
     svc = TimelapseService(cfg, captures_dir=tmp_path)
@@ -288,3 +308,122 @@ def test_capture_thread_crash_clears_ref(tmp_path):
     svc._capture_thread.join(timeout=2)
 
     assert svc._capture_thread is None, "_capture_thread should be None after crash"
+
+
+def test_stop_capture_thread_clears_stale_dead_thread_reference(tmp_path):
+    import threading
+
+    config_mgr = SimpleNamespace(config_root=str(tmp_path))
+    svc = TimelapseService(config_mgr, captures_dir=str(tmp_path))
+
+    stale_thread = threading.Thread(target=lambda: None, daemon=True)
+    stale_thread.start()
+    stale_thread.join(timeout=2)
+    assert stale_thread.is_alive() is False
+
+    svc._capture_thread = stale_thread
+    svc._stop_capture_thread()
+
+    assert svc._capture_thread is None
+
+
+def test_capture_loop_skips_snapshots_while_capture_is_paused(tmp_path):
+    import threading
+
+    config_mgr = SimpleNamespace(config_root=str(tmp_path))
+    svc = TimelapseService(config_mgr, captures_dir=str(tmp_path))
+    svc._interval = 0.01
+
+    snapshot_called = threading.Event()
+
+    def fake_snapshot():
+        snapshot_called.set()
+        svc._stop_event.set()
+
+    svc._take_snapshot = fake_snapshot
+    svc.set_capture_paused(True, reason="filament_change")
+    svc._capture_thread = threading.Thread(target=svc._capture_loop, daemon=True)
+    svc._capture_thread.start()
+
+    time.sleep(0.05)
+    assert snapshot_called.is_set() is False
+
+    svc.set_capture_paused(False)
+    svc._capture_thread.join(timeout=2)
+
+    assert snapshot_called.is_set() is True
+
+
+def test_await_video_frame_requests_recovery_when_frames_go_stale(monkeypatch, tmp_path):
+    cfg = FakeConfigManager(tmp_path)
+    svc = TimelapseService(cfg, captures_dir=tmp_path)
+    requests = []
+    videoqueue = SimpleNamespace(
+        last_frame_at=None,
+        pppp=SimpleNamespace(connected=False),
+        request_live_recovery=lambda **kwargs: requests.append(kwargs) or True,
+    )
+    old_svc = web.app.svc
+    web.app.svc = SimpleNamespace(svcs={"videoqueue": videoqueue})
+
+    try:
+        monkeypatch.setattr("web.service.timelapse.time.sleep", lambda seconds: None)
+        assert svc._await_video_frame(timeout=0.01, max_age=1.5) is False
+    finally:
+        web.app.svc = old_svc
+
+    assert len(requests) == 1
+    assert requests[0]["reason"] == "timelapse has no recent video frame"
+    assert requests[0]["force_pppp_recycle"] is True
+
+
+def test_snapshot_timeout_requests_video_recovery(monkeypatch, tmp_path):
+    cfg = FakeConfigManager(tmp_path)
+    svc = TimelapseService(cfg, captures_dir=tmp_path)
+    svc._current_dir = str(tmp_path / "capture")
+    svc._current_filename = "cube.gcode"
+    svc._frame_count = 0
+    os.makedirs(svc._current_dir, exist_ok=True)
+
+    requests = []
+    videoqueue = SimpleNamespace(
+        request_live_recovery=lambda **kwargs: requests.append(kwargs) or True,
+    )
+    old_svc = web.app.svc
+    old_api_key = web.app.config.get("api_key")
+    web.app.svc = SimpleNamespace(svcs={"videoqueue": videoqueue})
+    web.app.config["api_key"] = None
+
+    def fake_run(*args, **kwargs):
+        raise __import__("subprocess").TimeoutExpired(cmd="ffmpeg", timeout=10)
+
+    try:
+        monkeypatch.setattr("web.service.timelapse._resolve_ffmpeg_path", lambda: "resolved-ffmpeg")
+        monkeypatch.setattr(TimelapseService, "_await_video_frame", lambda self: True)
+        monkeypatch.setattr("web.service.timelapse.subprocess.run", fake_run)
+        monkeypatch.setattr("web.service.timelapse.time.sleep", lambda seconds: None)
+        svc._take_snapshot()
+    finally:
+        web.app.svc = old_svc
+        web.app.config["api_key"] = old_api_key
+
+    assert len(requests) == 1
+    assert requests[0]["reason"] == "timelapse snapshot timed out waiting for a camera frame"
+    assert requests[0]["force_pppp_recycle"] is True
+
+
+def test_timelapse_runtime_state_reports_recovery(tmp_path):
+    cfg = FakeConfigManager(tmp_path)
+    svc = TimelapseService(cfg, captures_dir=tmp_path)
+
+    svc._set_recovery_state(True, "timelapse has no recent video frame")
+    state = svc.get_runtime_state()
+
+    assert state["recovering"] is True
+    assert state["recovery_reason"] == "timelapse has no recent video frame"
+    assert state["detail"] == "Recovering video stream..."
+
+    svc._set_recovery_state(False)
+    cleared = svc.get_runtime_state()
+    assert cleared["recovering"] is False
+    assert cleared["detail"] is None
