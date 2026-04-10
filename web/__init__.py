@@ -2786,12 +2786,15 @@ def _local_web_host_port():
     return host, port
 
 
-def _validate_selected_printer_camera(camera_settings):
+def _validate_selected_printer_camera(camera_settings, *, stream_state=True):
     if camera_settings.get("effective_source") != web.camera.CAMERA_SOURCE_PRINTER:
         return None
 
     if not app.config.get("video_supported", False):
         return {"error": "Printer camera is not supported for the selected printer"}, 400
+
+    if not stream_state:
+        return None
 
     vq = app.svc.svcs.get("videoqueue")
     if not vq:
@@ -2806,11 +2809,15 @@ def _validate_selected_printer_camera(camera_settings):
 
 
 def _capture_selected_camera_snapshot_temp(camera_settings, *, scale=None, for_timelapse=False):
+    camera_error = _validate_selected_printer_camera(camera_settings, stream_state=False)
+    if camera_error is not None:
+        raise ValueError(camera_error)
+
     ffmpeg_path = _ffmpeg_path()
     if not ffmpeg_path:
         raise RuntimeError("ffmpeg not installed")
 
-    camera_error = _validate_selected_printer_camera(camera_settings)
+    camera_error = _validate_selected_printer_camera(camera_settings, stream_state=True)
     if camera_error is not None:
         raise ValueError(camera_error)
 
