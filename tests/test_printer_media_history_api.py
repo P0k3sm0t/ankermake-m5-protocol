@@ -673,6 +673,166 @@ def test_timelapse_routes_list_download_delete_and_reject_traversal(tmp_path):
     assert snapshot_deleted.status_code == 200
 
 
+def test_timelapse_media_routes_honor_requested_printer_index(tmp_path):
+    cfg = _base_config()
+    cfg.printers.append(_printer("SN2", "Printer 2"))
+
+    zero_dir = tmp_path / "captures-zero"
+    zero_dir.mkdir()
+    zero_video = zero_dir / "zero.mp4"
+    zero_video.write_bytes(b"zero-mp4")
+    zero_snapshot_dir = zero_dir / "snapshots" / "zero_capture"
+    zero_snapshot_dir.mkdir(parents=True)
+    zero_snapshot = zero_snapshot_dir / "frame_00000.jpg"
+    zero_snapshot.write_bytes(b"zero-jpg")
+
+    one_dir = tmp_path / "captures-one"
+    one_dir.mkdir()
+    one_video = one_dir / "one.mp4"
+    one_video.write_bytes(b"one-mp4")
+    one_snapshot_dir = one_dir / "snapshots" / "one_capture"
+    one_snapshot_dir.mkdir(parents=True)
+    one_snapshot = one_snapshot_dir / "frame_00000.jpg"
+    one_snapshot.write_bytes(b"one-jpg")
+
+    timelapse_zero = SimpleNamespace(
+        enabled=False,
+        _captures_dir=str(zero_dir),
+        list_videos=lambda: [{"filename": "zero.mp4", "size_bytes": 8}],
+        list_snapshots=lambda: [{
+            "id": "zero_capture",
+            "label": "zero.gcode",
+            "frame_count": 1,
+            "allow_delete": True,
+            "frames": [{"filename": "frame_00000.jpg", "size_bytes": 8}],
+        }],
+        get_video_path=lambda filename: str(zero_video) if filename == "zero.mp4" else None,
+        delete_video=lambda filename: filename == "zero.mp4",
+        get_snapshot_path=lambda collection_id, filename: (
+            str(zero_snapshot)
+            if collection_id == "zero_capture" and filename == "frame_00000.jpg"
+            else None
+        ),
+        delete_snapshot=lambda collection_id, filename: (
+            collection_id == "zero_capture" and filename == "frame_00000.jpg"
+        ),
+    )
+    timelapse_one = SimpleNamespace(
+        enabled=True,
+        _captures_dir=str(one_dir),
+        list_videos=lambda: [{"filename": "one.mp4", "size_bytes": 7}],
+        list_snapshots=lambda: [{
+            "id": "one_capture",
+            "label": "one.gcode",
+            "frame_count": 1,
+            "allow_delete": True,
+            "frames": [{"filename": "frame_00000.jpg", "size_bytes": 7}],
+        }],
+        get_video_path=lambda filename: str(one_video) if filename == "one.mp4" else None,
+        delete_video=lambda filename: filename == "one.mp4",
+        get_snapshot_path=lambda collection_id, filename: (
+            str(one_snapshot)
+            if collection_id == "one_capture" and filename == "frame_00000.jpg"
+            else None
+        ),
+        delete_snapshot=lambda collection_id, filename: (
+            collection_id == "one_capture" and filename == "frame_00000.jpg"
+        ),
+    )
+
+    mqtt_zero = SimpleNamespace(
+        timelapse=timelapse_zero,
+        get_state=lambda: {"printer_marker": "zero"},
+    )
+    mqtt_one = SimpleNamespace(
+        timelapse=timelapse_one,
+        get_state=lambda: {"printer_marker": "one"},
+    )
+
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(config=cfg)
+    app.svc = FakeServices(**{"mqttqueue:0": mqtt_zero, "mqttqueue:1": mqtt_one})
+
+    try:
+        listed = client.get("/api/timelapses?printer_index=1", headers={"X-Api-Key": API_KEY})
+        listed_snapshots = client.get("/api/timelapse-snapshots?printer_index=1", headers={"X-Api-Key": API_KEY})
+        runtime = client.get("/api/printer/runtime-state?printer_index=1", headers={"X-Api-Key": API_KEY})
+        downloaded = client.get("/api/timelapse/one.mp4?printer_index=1", headers={"X-Api-Key": API_KEY})
+        deleted = client.delete("/api/timelapse/one.mp4?printer_index=1", headers={"X-Api-Key": API_KEY})
+        snapshot_downloaded = client.get(
+            "/api/timelapse-snapshot/one_capture/frame_00000.jpg?printer_index=1",
+            headers={"X-Api-Key": API_KEY},
+        )
+        snapshot_deleted = client.delete(
+            "/api/timelapse-snapshot/one_capture/frame_00000.jpg?printer_index=1",
+            headers={"X-Api-Key": API_KEY},
+        )
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert listed.status_code == 200
+    assert listed.get_json()["enabled"] is True
+    assert listed.get_json()["videos"] == [{"filename": "one.mp4", "size_bytes": 7}]
+    assert listed_snapshots.status_code == 200
+    assert listed_snapshots.get_json()["collections"][0]["id"] == "one_capture"
+    assert runtime.status_code == 200
+    assert runtime.get_json()["printer_marker"] == "one"
+    assert downloaded.status_code == 200
+    assert downloaded.data == b"one-mp4"
+    assert deleted.status_code == 200
+    assert snapshot_downloaded.status_code == 200
+    assert snapshot_downloaded.data == b"one-jpg"
+    assert snapshot_deleted.status_code == 200
+
+
+def test_timelapse_current_routes_honor_requested_printer_index():
+    cfg = _base_config()
+    cfg.printers.append(_printer("SN2", "Printer 2"))
+
+    zero_calls = []
+    one_calls = []
+
+    mqtt_zero = SimpleNamespace(
+        start_timelapse_for_current_print=lambda: zero_calls.append("start") or "zero.gcode",
+        pause_timelapse_for_current_print=lambda: zero_calls.append("pause") or "zero.gcode",
+        resume_timelapse_for_current_print=lambda: zero_calls.append("resume") or "zero.gcode",
+        stop_timelapse_for_current_print=lambda: zero_calls.append("stop") or "zero.gcode",
+        dismiss_timelapse_start_offer=lambda: zero_calls.append("dismiss"),
+        get_state=lambda: {"printer_marker": "zero"},
+    )
+    mqtt_one = SimpleNamespace(
+        start_timelapse_for_current_print=lambda: one_calls.append("start") or "one.gcode",
+        pause_timelapse_for_current_print=lambda: one_calls.append("pause") or "one.gcode",
+        resume_timelapse_for_current_print=lambda: one_calls.append("resume") or "one.gcode",
+        stop_timelapse_for_current_print=lambda: one_calls.append("stop") or "one.gcode",
+        dismiss_timelapse_start_offer=lambda: one_calls.append("dismiss"),
+        get_state=lambda: {"printer_marker": "one"},
+    )
+
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(config=cfg)
+    app.svc = FakeServices(**{"mqttqueue:0": mqtt_zero, "mqttqueue:1": mqtt_one})
+
+    try:
+        start_response = client.post("/api/timelapse/current/start?printer_index=1", headers={"X-Api-Key": API_KEY})
+        pause_response = client.post("/api/timelapse/current/pause?printer_index=1", headers={"X-Api-Key": API_KEY})
+        resume_response = client.post("/api/timelapse/current/resume?printer_index=1", headers={"X-Api-Key": API_KEY})
+        stop_response = client.post("/api/timelapse/current/stop?printer_index=1", headers={"X-Api-Key": API_KEY})
+        dismiss_response = client.post("/api/timelapse/current/dismiss?printer_index=1", headers={"X-Api-Key": API_KEY})
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert start_response.status_code == 200
+    assert pause_response.status_code == 200
+    assert resume_response.status_code == 200
+    assert stop_response.status_code == 200
+    assert dismiss_response.status_code == 200
+    assert zero_calls == []
+    assert one_calls == ["start", "pause", "resume", "stop", "dismiss"]
+    assert start_response.get_json()["filename"] == "one.gcode"
+    assert start_response.get_json()["printer_marker"] == "one"
+
+
 def test_snapshot_route_reports_expected_error_paths(monkeypatch):
     client = app.test_client()
     old_values, old_svc = _install_app_state(video_supported=False, videoqueue=None)

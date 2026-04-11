@@ -2964,10 +2964,11 @@ def app_api_printer_settings_summary():
 
 @app.get("/api/printer/runtime-state")
 def app_api_printer_runtime_state():
-    with borrow_mqtt() as mqtt:
+    printer_index = _requested_printer_index()
+    with borrow_mqtt(printer_index) as mqtt:
         if not mqtt:
             return {"error": "Service unavailable"}, 503
-        state = _build_runtime_state_payload(mqtt)
+        state = _build_runtime_state_payload(mqtt, printer_index=printer_index)
     return {"status": "ok", **state}
 
 
@@ -3641,7 +3642,10 @@ def app_api_filament_service_swap_cancel():
 @app.get("/api/timelapses")
 def app_api_timelapses():
     """List available timelapse videos."""
-    with borrow_mqtt() as mqtt:
+    printer_index = _requested_printer_index()
+    with borrow_mqtt(printer_index) as mqtt:
+        if not mqtt:
+            return {"error": "Service unavailable"}, 503
         videos = mqtt.timelapse.list_videos()
         enabled = mqtt.timelapse.enabled
     return {"videos": videos, "enabled": enabled}
@@ -3650,7 +3654,10 @@ def app_api_timelapses():
 @app.get("/api/timelapse-snapshots")
 def app_api_timelapse_snapshots():
     """List available timelapse snapshot collections and frames."""
-    with borrow_mqtt() as mqtt:
+    printer_index = _requested_printer_index()
+    with borrow_mqtt(printer_index) as mqtt:
+        if not mqtt:
+            return {"error": "Service unavailable"}, 503
         collections = mqtt.timelapse.list_snapshots()
         enabled = mqtt.timelapse.enabled
     return {"collections": collections, "enabled": enabled}
@@ -3658,63 +3665,68 @@ def app_api_timelapse_snapshots():
 
 @app.post("/api/timelapse/current/start")
 def app_api_timelapse_current_start():
-    with borrow_mqtt() as mqtt:
+    printer_index = _requested_printer_index()
+    with borrow_mqtt(printer_index) as mqtt:
         if not mqtt:
             return {"error": "Service unavailable"}, 503
         try:
             filename = mqtt.start_timelapse_for_current_print()
         except RuntimeError as exc:
             return {"error": str(exc)}, 409
-        state = _build_runtime_state_payload(mqtt)
+        state = _build_runtime_state_payload(mqtt, printer_index=printer_index)
     return {"status": "ok", "filename": filename, **state}
 
 
 @app.post("/api/timelapse/current/dismiss")
 def app_api_timelapse_current_dismiss():
-    with borrow_mqtt() as mqtt:
+    printer_index = _requested_printer_index()
+    with borrow_mqtt(printer_index) as mqtt:
         if not mqtt:
             return {"error": "Service unavailable"}, 503
         mqtt.dismiss_timelapse_start_offer()
-        state = _build_runtime_state_payload(mqtt)
+        state = _build_runtime_state_payload(mqtt, printer_index=printer_index)
     return {"status": "ok", **state}
 
 
 @app.post("/api/timelapse/current/pause")
 def app_api_timelapse_current_pause():
-    with borrow_mqtt() as mqtt:
+    printer_index = _requested_printer_index()
+    with borrow_mqtt(printer_index) as mqtt:
         if not mqtt:
             return {"error": "Service unavailable"}, 503
         try:
             filename = mqtt.pause_timelapse_for_current_print()
         except RuntimeError as exc:
             return {"error": str(exc)}, 409
-        state = _build_runtime_state_payload(mqtt)
+        state = _build_runtime_state_payload(mqtt, printer_index=printer_index)
     return {"status": "ok", "filename": filename, **state}
 
 
 @app.post("/api/timelapse/current/resume")
 def app_api_timelapse_current_resume():
-    with borrow_mqtt() as mqtt:
+    printer_index = _requested_printer_index()
+    with borrow_mqtt(printer_index) as mqtt:
         if not mqtt:
             return {"error": "Service unavailable"}, 503
         try:
             filename = mqtt.resume_timelapse_for_current_print()
         except RuntimeError as exc:
             return {"error": str(exc)}, 409
-        state = _build_runtime_state_payload(mqtt)
+        state = _build_runtime_state_payload(mqtt, printer_index=printer_index)
     return {"status": "ok", "filename": filename, **state}
 
 
 @app.post("/api/timelapse/current/stop")
 def app_api_timelapse_current_stop():
-    with borrow_mqtt() as mqtt:
+    printer_index = _requested_printer_index()
+    with borrow_mqtt(printer_index) as mqtt:
         if not mqtt:
             return {"error": "Service unavailable"}, 503
         try:
             filename = mqtt.stop_timelapse_for_current_print()
         except RuntimeError as exc:
             return {"error": str(exc)}, 409
-        state = _build_runtime_state_payload(mqtt)
+        state = _build_runtime_state_payload(mqtt, printer_index=printer_index)
     return {"status": "ok", "filename": filename, **state}
 
 
@@ -3724,7 +3736,10 @@ def app_api_timelapse_download(filename):
     from flask import send_file
     if "/" in filename or "\\" in filename or ".." in filename:
         return jsonify({"error": "invalid filename"}), 400
-    with borrow_mqtt() as mqtt:
+    printer_index = _requested_printer_index()
+    with borrow_mqtt(printer_index) as mqtt:
+        if not mqtt:
+            return {"error": "Service unavailable"}, 503
         path = mqtt.timelapse.get_video_path(filename)
         captures_dir = os.path.realpath(mqtt.timelapse._captures_dir)
     if not path:
@@ -3739,7 +3754,10 @@ def app_api_timelapse_delete(filename):
     """Delete a timelapse video."""
     if "/" in filename or "\\" in filename or ".." in filename:
         return jsonify({"error": "invalid filename"}), 400
-    with borrow_mqtt() as mqtt:
+    printer_index = _requested_printer_index()
+    with borrow_mqtt(printer_index) as mqtt:
+        if not mqtt:
+            return {"error": "Service unavailable"}, 503
         captures_dir = os.path.realpath(mqtt.timelapse._captures_dir)
         path = mqtt.timelapse.get_video_path(filename)
         if not path or not os.path.realpath(path).startswith(captures_dir + os.sep):
@@ -3761,7 +3779,10 @@ def app_api_timelapse_snapshot_download(collection_id, filename):
     ):
         return jsonify({"error": "invalid filename"}), 400
 
-    with borrow_mqtt() as mqtt:
+    printer_index = _requested_printer_index()
+    with borrow_mqtt(printer_index) as mqtt:
+        if not mqtt:
+            return {"error": "Service unavailable"}, 503
         path = mqtt.timelapse.get_snapshot_path(collection_id, filename)
         captures_dir = os.path.realpath(mqtt.timelapse._captures_dir)
 
@@ -3788,7 +3809,10 @@ def app_api_timelapse_snapshot_delete(collection_id, filename):
     ):
         return jsonify({"error": "invalid filename"}), 400
 
-    with borrow_mqtt() as mqtt:
+    printer_index = _requested_printer_index()
+    with borrow_mqtt(printer_index) as mqtt:
+        if not mqtt:
+            return {"error": "Service unavailable"}, 503
         try:
             deleted = mqtt.timelapse.delete_snapshot(collection_id, filename)
         except RuntimeError as exc:

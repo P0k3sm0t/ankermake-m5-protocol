@@ -208,8 +208,12 @@ def test_nonzero_printer_services_do_not_fallback_to_legacy_instances():
         viewer_connected=lambda: viewer_events.append("connect"),
         viewer_disconnected=lambda: viewer_events.append("disconnect"),
     )
+    mqtt_sock = None
+    video_sock = None
     services = FakeServices(
         streams={
+            "mqttqueue": [{"hello": "legacy-mqtt"}],
+            web_module.mqtt_service_name(1): [{"hello": "mqtt-1"}],
             "videoqueue": [SimpleNamespace(data=b"legacy-frame")],
             web_module.video_service_name(1): [SimpleNamespace(data=b"printer-two-frame")],
         },
@@ -233,9 +237,12 @@ def test_nonzero_printer_services_do_not_fallback_to_legacy_instances():
     old_values, old_svc = _install_app_state(web_module, svc=services)
 
     try:
+        with web_module.app.test_request_context("/ws/mqtt?printer_index=1"):
+            mqtt_sock = FakeSock(close_after_sends=1)
+            _ws_handler(web_module, "mqtt")(mqtt_sock)
         with web_module.app.test_request_context("/ws/video?printer_index=1"):
-            sock = FakeSock(close_after_sends=1)
-            _ws_handler(web_module, "video")(sock)
+            video_sock = FakeSock(close_after_sends=1)
+            _ws_handler(web_module, "video")(video_sock)
         mqtt_name = web_module.get_mqtt_service(1).name
         pppp_name = web_module.get_pppp_service(1).name
         resolved_video = web_module.get_video_service(1)
@@ -244,7 +251,8 @@ def test_nonzero_printer_services_do_not_fallback_to_legacy_instances():
     finally:
         _restore_app_state(web_module, old_values, old_svc)
 
-    assert sock.sent == [b"printer-two-frame"]
+    assert mqtt_sock.sent == [json.dumps({"hello": "mqtt-1"})]
+    assert video_sock.sent == [b"printer-two-frame"]
     assert viewer_events == ["connect", "disconnect"]
     assert mqtt_name == "mqtt-1"
     assert pppp_name == "pppp-1"

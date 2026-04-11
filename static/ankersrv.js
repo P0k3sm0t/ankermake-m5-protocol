@@ -682,7 +682,7 @@ $(function () {
     }
 
     async function sendTimelapseCurrentAction(endpoint, successMessage) {
-        const resp = await fetch(endpoint, { method: "POST" });
+        const resp = await fetch(withActivePrinterQuery(endpoint), { method: "POST" });
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok) {
             throw new Error(data.error || `HTTP ${resp.status}`);
@@ -830,7 +830,7 @@ $(function () {
         }
         _printerRuntimeLoading = true;
         try {
-            const resp = await fetch("/api/printer/runtime-state");
+            const resp = await fetch(withActivePrinterQuery("/api/printer/runtime-state"));
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok) {
                 throw new Error(data.error || `HTTP ${resp.status}`);
@@ -862,6 +862,21 @@ $(function () {
             return parsed;
         }
         return 0;
+    }
+
+    function withActivePrinterQuery(url) {
+        const activePrinterIndex = String(getActivePrinterIndex());
+        try {
+            const resolved = new URL(url, window.location.origin);
+            resolved.searchParams.set("printer_index", activePrinterIndex);
+            if (resolved.origin === window.location.origin) {
+                return `${resolved.pathname}${resolved.search}${resolved.hash}`;
+            }
+            return resolved.toString();
+        } catch (_err) {
+            const separator = String(url).includes("?") ? "&" : "?";
+            return `${url}${separator}printer_index=${encodeURIComponent(activePrinterIndex)}`;
+        }
     }
 
     function processPrinterAlertEntries(entries, notifyUser) {
@@ -1181,7 +1196,7 @@ $(function () {
 
     sockets.mqtt = new AutoWebSocket({
         name: "mqtt socket",
-        url: `${location.protocol.replace("http", "ws")}//${location.host}/ws/mqtt`,
+        url: `${location.protocol.replace("http", "ws")}//${location.host}/ws/mqtt?printer_index=${encodeURIComponent(getActivePrinterIndex())}`,
         badge: "#badge-mqtt",
 
         message: function (ev) {
@@ -3976,11 +3991,15 @@ $(function () {
             imageEl.onerror = function () {
                 clearTimelapseSnapshotPreview("Unable to load snapshot preview");
             };
-            imageEl.src = `/api/timelapse-snapshot/${encodeURIComponent(collection.id)}/${encodeURIComponent(frame.filename)}`;
+            imageEl.src = withActivePrinterQuery(
+                `/api/timelapse-snapshot/${encodeURIComponent(collection.id)}/${encodeURIComponent(frame.filename)}`
+            );
         }
         if (downloadEl) {
             downloadEl.classList.remove("disabled");
-            downloadEl.href = `/api/timelapse-snapshot/${encodeURIComponent(collection.id)}/${encodeURIComponent(frame.filename)}?download=1`;
+            downloadEl.href = withActivePrinterQuery(
+                `/api/timelapse-snapshot/${encodeURIComponent(collection.id)}/${encodeURIComponent(frame.filename)}?download=1`
+            );
             downloadEl.setAttribute("download", frame.filename);
         }
         if (deleteBtn) {
@@ -4050,7 +4069,7 @@ $(function () {
     }
 
     function loadTimelapseSnapshots() {
-        return fetch("/api/timelapse-snapshots")
+        return fetch(withActivePrinterQuery("/api/timelapse-snapshots"))
             .then(r => r.json())
             .then(data => {
                 _timelapseSnapshotCollections = Array.isArray(data.collections) ? data.collections : [];
@@ -4115,7 +4134,7 @@ $(function () {
 
         if (deleteBtn) deleteBtn.dataset.file = v.filename;
         videoEl.dataset.file = v.filename;
-        videoEl.src = `/api/timelapse/${encodeURIComponent(v.filename)}`;
+        videoEl.src = withActivePrinterQuery(`/api/timelapse/${encodeURIComponent(v.filename)}`);
         videoEl.style.display = "";
         videoEl.load();
 
@@ -4124,7 +4143,7 @@ $(function () {
     }
 
     function loadTimelapses() {
-        fetch("/api/timelapses")
+        fetch(withActivePrinterQuery("/api/timelapses"))
             .then(r => r.json())
             .then(data => {
                 const banner = document.getElementById("timelapse-disabled-banner");
@@ -4157,7 +4176,7 @@ $(function () {
                             <div class="text-muted" style="font-size:0.75em;">${created} · ${formatSize(v.size_bytes)}</div>
                         </div>
                         <div class="d-flex gap-1 flex-shrink-0">
-                            <a href="/api/timelapse/${encodeURIComponent(v.filename)}" class="btn btn-sm btn-outline-secondary" download title="Download">
+                            <a href="${withActivePrinterQuery(`/api/timelapse/${encodeURIComponent(v.filename)}`)}" class="btn btn-sm btn-outline-secondary" download title="Download">
                                 <i class="bi bi-download"></i>
                             </a>
                             <button type="button" class="btn btn-sm btn-outline-danger timelapse-delete" title="Delete">
@@ -4331,7 +4350,9 @@ $(function () {
         btn.prop("disabled", true);
         try {
             const resp = await fetch(
-                `/api/timelapse-snapshot/${encodeURIComponent(collectionId)}/${encodeURIComponent(filename)}`,
+                withActivePrinterQuery(
+                    `/api/timelapse-snapshot/${encodeURIComponent(collectionId)}/${encodeURIComponent(filename)}`
+                ),
                 { method: "DELETE" }
             );
             const data = await resp.json().catch(() => ({}));
@@ -4351,7 +4372,7 @@ $(function () {
     $(document).on("click", ".timelapse-delete", function () {
         const file = $(this).data("file");
         if (!confirm(`Delete timelapse ${file}?`)) return;
-        fetch(`/api/timelapse/${encodeURIComponent(file)}`, { method: "DELETE" })
+        fetch(withActivePrinterQuery(`/api/timelapse/${encodeURIComponent(file)}`), { method: "DELETE" })
             .then(() => {
                 const videoEl = document.getElementById("timelapse-player");
                 if (videoEl && (videoEl.dataset.file || "") === file) {
