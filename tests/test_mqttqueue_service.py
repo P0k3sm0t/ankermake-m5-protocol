@@ -1,3 +1,4 @@
+import logging
 import time
 from types import SimpleNamespace
 
@@ -1236,6 +1237,57 @@ def test_state_after_reset_is_always_idle():
         queue._state = state
         queue._reset_print_state()
         assert queue._state == PrintState.IDLE, f"Expected IDLE after reset from {state.name}"
+
+
+def test_pending_prepare_state_log_is_emitted_once_for_repeated_value8(caplog):
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+    queue.mark_pending_print_start("queued.gcode")
+
+    with caplog.at_level(logging.INFO, logger="mqtt"):
+        queue._handle_notification({"commandType": 1000, "value": 8})
+        queue._handle_notification({"commandType": 1000, "value": 8})
+        queue._handle_notification({"commandType": 1000, "value": 8})
+
+    assert caplog.text.count("Pending print start entered firmware prepare state (ct 1000 value=8)") == 1
+
+
+def test_recent_completion_bare_ct1000_log_is_emitted_once(caplog, monkeypatch):
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+    monkeypatch.setattr("web.service.mqtt.time.monotonic", lambda: 100.0)
+    queue._remember_recent_completion(filename="cube.gcode", task_id="task-1")
+
+    with caplog.at_level(logging.INFO, logger="mqtt"):
+        queue._handle_notification({"commandType": 1000, "value": 1})
+        queue._handle_notification({"commandType": 1000, "value": 1})
+        queue._handle_notification({"commandType": 1000, "value": 1})
+
+    assert caplog.text.count("Ignoring bare ct 1000 value=1 immediately after print completion") == 1
+
+
+def test_recent_completion_stale_progress_log_is_emitted_once(caplog, monkeypatch):
+    global ha_updates, history_calls, timelapse_calls, events
+    ha_updates, history_calls, timelapse_calls, events = [], [], [], []
+    queue = _queue()
+    monkeypatch.setattr("web.service.mqtt.time.monotonic", lambda: 100.0)
+    queue._remember_recent_completion(filename="cube.gcode", task_id="task-1")
+
+    payload = {
+        "commandType": 1001,
+        "progress": 0,
+        "task_id": "task-1",
+        "name": "cube.gcode",
+    }
+
+    with caplog.at_level(logging.INFO, logger="mqtt"):
+        queue._handle_notification(payload)
+        queue._handle_notification(payload)
+        queue._handle_notification(payload)
+
+    assert caplog.text.count("Ignoring stale post-completion update for task_id=task-1 filename='cube.gcode'") == 1
 
 
 def test_duplicate_ct1001_failure_only_fires_once():

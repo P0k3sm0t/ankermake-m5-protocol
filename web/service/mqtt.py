@@ -113,7 +113,10 @@ class MqttQueue(Service):
     def worker_init(self):
         self._notifier = AppriseNotifier(app.config["config"], printer_index=self.printer_index)
         config_root = str(app.config["config"].config_root)
-        self._history = PrintHistory(db_path=f"{config_root}/history.db")
+        self._history = PrintHistory(
+            db_path=f"{config_root}/history.db",
+            printer_index=self.printer_index,
+        )
         self._timelapse = TimelapseService(app.config["config"], printer_index=self.printer_index)
 
         # Home Assistant MQTT Discovery
@@ -210,6 +213,7 @@ class MqttQueue(Service):
         self._last_selected_storage_file_name = None
         self._last_print_schedule_filename = None
         self._last_print_schedule_seen_at = 0.0
+        self._pending_prepare_state_logged = False
         self._clear_timelapse_start_offer()
         self._pause_reason = None
         self._filament_runout_pending = False
@@ -430,6 +434,8 @@ class MqttQueue(Service):
         self._recent_completion_filename = None
         self._recent_completion_task_id = None
         self._recent_completion_at = 0.0
+        self._recent_completion_bare_state_logged = False
+        self._recent_completion_stale_update_logged = False
 
     def _remember_recent_completion(self, filename=None, task_id=None):
         saved_filename = os.path.basename(str(filename or self._last_filename or "")).strip()
@@ -437,6 +443,8 @@ class MqttQueue(Service):
         self._recent_completion_filename = saved_filename or None
         self._recent_completion_task_id = saved_task_id or None
         self._recent_completion_at = time.monotonic()
+        self._recent_completion_bare_state_logged = False
+        self._recent_completion_stale_update_logged = False
 
     def _recent_completion_matches(self, *, task_id=None, filename=None):
         recent_completion_at = getattr(self, "_recent_completion_at", 0.0)
@@ -469,6 +477,7 @@ class MqttQueue(Service):
                 }
             self._clear_recent_completion()
             self._state = PrintState.PREPARING
+            self._pending_prepare_state_logged = False
             self._stop_requested = False
         log.info("Marked pending print start for %r", self._last_filename)
 
@@ -1271,7 +1280,9 @@ class MqttQueue(Service):
                     and getattr(self, "_recent_completion_at", 0.0)
                     and (time.monotonic() - getattr(self, "_recent_completion_at", 0.0)) <= RECENT_COMPLETION_GUARD_SEC
                 ):
-                    log.info("Ignoring bare ct 1000 value=1 immediately after print completion")
+                    if not getattr(self, "_recent_completion_bare_state_logged", False):
+                        log.info("Ignoring bare ct 1000 value=1 immediately after print completion")
+                        self._recent_completion_bare_state_logged = True
                 else:
                     self._transition_to_active(payload, progress=0)
             elif value == 2 and self._state == PrintState.PRINTING:
@@ -1328,7 +1339,9 @@ class MqttQueue(Service):
                     self._reset_print_state()
             elif value == 8:
                 if self._state == PrintState.PREPARING:
-                    log.info("Pending print start entered firmware prepare state (ct 1000 value=8)")
+                    if not getattr(self, "_pending_prepare_state_logged", False):
+                        log.info("Pending print start entered firmware prepare state (ct 1000 value=8)")
+                        self._pending_prepare_state_logged = True
                 else:
                     self._state = PrintState.IDLE
             log.debug(
@@ -1369,11 +1382,13 @@ class MqttQueue(Service):
             and not self.is_preparing_print
             and self._recent_completion_matches(task_id=task_id, filename=incoming_filename)
         ):
-            log.info(
-                "Ignoring stale post-completion update for task_id=%s filename=%r",
-                task_id,
-                incoming_filename,
-            )
+            if not getattr(self, "_recent_completion_stale_update_logged", False):
+                log.info(
+                    "Ignoring stale post-completion update for task_id=%s filename=%r",
+                    task_id,
+                    incoming_filename,
+                )
+                self._recent_completion_stale_update_logged = True
             return
         if task_id:
             if self._last_task_id and task_id != self._last_task_id and self._state == PrintState.PRINTING:

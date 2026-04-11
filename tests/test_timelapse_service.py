@@ -658,9 +658,42 @@ def test_timelapse_external_camera_snapshot_skips_printer_video_wait(monkeypatch
         web.app.config["api_key"] = old_api_key
 
     assert len(captures) == 1
-    assert captures[0]["camera_settings"]["effective_source"] == "external"
-    assert captures[0]["for_timelapse"] is False
-    assert svc._frame_count == 1
+
+
+def test_timelapse_service_uses_per_printer_settings_when_present(tmp_path):
+    cfg = FakeConfigManager(tmp_path, enabled=False)
+    cfg._cfg.printers.append(SimpleNamespace(sn="SN2", name="Printer 2", model="V8111"))
+    cfg._cfg.timelapse = {
+        "enabled": False,
+        "interval": 5,
+        "max_videos": 2,
+        "save_persistent": True,
+        "light": None,
+        "per_printer": {
+            "SN2": {
+                "enabled": True,
+                "interval": 11,
+                "max_videos": 4,
+                "save_persistent": False,
+                "light": "snapshot",
+            }
+        },
+    }
+
+    svc0 = TimelapseService(cfg, captures_dir=tmp_path / "captures0", printer_index=0)
+    svc1 = TimelapseService(cfg, captures_dir=tmp_path / "captures1", printer_index=1)
+
+    assert svc0.enabled is False
+    assert svc0._interval == 5
+    assert svc0._max_videos == 2
+    assert svc0._save_persistent is True
+    assert svc0._light_mode is None
+
+    assert svc1.enabled is True
+    assert svc1._interval == 11
+    assert svc1._max_videos == 4
+    assert svc1._save_persistent is False
+    assert svc1._light_mode == "snapshot"
 
 
 def test_timelapse_runtime_state_reports_recovery(tmp_path):

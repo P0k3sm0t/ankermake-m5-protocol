@@ -4399,7 +4399,7 @@ $(function () {
 
         const loadTimelapseSettings = async () => {
             try {
-                const resp = await fetch("/api/settings/timelapse");
+                const resp = await fetch(withActivePrinterQuery("/api/settings/timelapse"));
                 if (resp.ok) {
                     const data = await resp.json();
                     const cfg = data.timelapse || {};
@@ -4427,7 +4427,7 @@ $(function () {
                 }
             };
             try {
-                const resp = await fetch("/api/settings/timelapse", {
+                const resp = await fetch(withActivePrinterQuery("/api/settings/timelapse"), {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify(payload)

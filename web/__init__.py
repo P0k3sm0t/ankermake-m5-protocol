@@ -262,6 +262,7 @@ from web.lib.service import ServiceManager, RunState, ServiceStoppedError
 import web.config
 import web.camera
 import web.platform
+import web.timelapse_settings
 import web.util
 
 import cli.util
@@ -1378,12 +1379,25 @@ def _maybe_start_pppp_probe(reason="scheduled", printer_index=None):
 
     pppp_service = get_pppp_service(printer_index)
     if pppp_service is not None and getattr(pppp_service, "wanted", False):
-        log.debug("Skipping PPPP probe because PPPP service is already reconnecting")
+        log.debug(
+            "Skipping PPPP probe for printer_index=%s because PPPP service is already reconnecting "
+            "(state=%s, connected=%s)",
+            printer_index,
+            getattr(pppp_service, "state", None),
+            getattr(pppp_service, "connected", False),
+        )
         return
 
     video_service = get_video_service(printer_index)
     if video_service is not None and getattr(video_service, "_awaiting_pppp_recycle", False):
-        log.debug("Skipping PPPP probe because VideoQueue is recycling PPPP in place")
+        log.debug(
+            "Skipping PPPP probe for printer_index=%s because VideoQueue is recycling PPPP in place "
+            "(wanted=%s, video_enabled=%s, timelapse_enabled=%s)",
+            printer_index,
+            getattr(video_service, "wanted", False),
+            getattr(video_service, "video_enabled", False),
+            getattr(video_service, "timelapse_enabled", False),
+        )
         return
 
     with app.pppp_probe_lock:
@@ -1406,12 +1420,22 @@ def _maybe_start_pppp_probe(reason="scheduled", printer_index=None):
                 else:
                     probe["fail_count"] += 1
                 fail_count = probe["fail_count"]
-            log.info(f"PPPP probe result: {'ok' if result else 'fail'} (fail_count={fail_count})")
+            log.info(
+                "PPPP probe result for printer_index=%s: %s (fail_count=%s)",
+                idx,
+                "ok" if result else "fail",
+                fail_count,
+            )
 
         t = threading.Thread(target=_run, daemon=True)
         probe["thread"] = t
         t.start()
-        log.info(f"Starting PPPP probe ({reason}, fail_count={probe['fail_count']})")
+        log.info(
+            "Starting PPPP probe for printer_index=%s (%s, fail_count=%s)",
+            printer_index,
+            reason,
+            probe["fail_count"],
+        )
 
 
 @sock.route("/ws/pppp-state")
@@ -1439,7 +1463,7 @@ def pppp_state(sock):
         return
 
     printer_index = _requested_printer_index()
-    log.info("Starting PPPP state websocket handler")
+    log.info("Starting PPPP state websocket handler for printer_index=%s", printer_index)
 
     last_status = None
     last_keepalive = 0.0
@@ -2276,12 +2300,13 @@ def app_api_settings_launcher_bat():
 @app.get("/api/settings/timelapse")
 def app_api_settings_timelapse():
     config = app.config["config"]
+    printer_index = _requested_printer_index()
     with config.open() as cfg:
         if not cfg:
             return {"error": "No printers configured"}, 400
-        timelapse_config = cli.model.merge_dict_defaults(
-            getattr(cfg, "timelapse", {}),
-            cli.model.default_timelapse_config()
+        timelapse_config = web.timelapse_settings.resolve_timelapse_settings(
+            cfg,
+            printer_index=printer_index,
         )
     return {"timelapse": timelapse_config}
 
@@ -2289,6 +2314,7 @@ def app_api_settings_timelapse():
 @app.post("/api/settings/timelapse")
 def app_api_settings_timelapse_update():
     config = app.config["config"]
+    printer_index = _requested_printer_index()
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
         return {"error": "Invalid JSON payload"}, 400
@@ -2300,14 +2326,14 @@ def app_api_settings_timelapse_update():
     with config.modify() as cfg:
         if not cfg:
             return {"error": "No printers configured"}, 400
-        
-        current = cli.model.merge_dict_defaults(
-            getattr(cfg, "timelapse", {}),
-            cli.model.default_timelapse_config()
-        )
-        # Deep update not strictly needed if structure is flat, but good practice
-        new_config = _deep_update(current, tl_payload)
-        cfg.timelapse = new_config
+        try:
+            new_config = web.timelapse_settings.update_timelapse_settings(
+                cfg,
+                printer_index,
+                tl_payload,
+            )
+        except ValueError as exc:
+            return {"error": str(exc)}, 400
 
     # Reload all printer-local timelapse helpers.
     for _, mqtt in iter_mqtt_services():

@@ -14,6 +14,7 @@ import time
 from datetime import datetime
 
 import web.camera
+import web.timelapse_settings
 
 
 _DEFAULT_INTERVAL_SEC = 30
@@ -96,10 +97,10 @@ class TimelapseService:
             with config.open() as cfg:
                 config = cfg
 
-        if not config or not getattr(config, 'timelapse', None):
+        if not config:
             return
 
-        cfg = config.timelapse
+        cfg = web.timelapse_settings.resolve_timelapse_settings(config, self._printer_index)
         self._enabled = cfg.get("enabled", False)
         self._interval = max(1, int(cfg.get("interval", _DEFAULT_INTERVAL_SEC)))
         self._max_videos = int(cfg.get("max_videos", _DEFAULT_MAX_VIDEOS))

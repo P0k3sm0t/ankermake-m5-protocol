@@ -1,6 +1,9 @@
 import socket
 
 from socket import AF_INET
+from types import SimpleNamespace
+
+import pytest
 
 from libflagship.cyclic import CyclicU16
 from libflagship.pppp import (
@@ -15,6 +18,7 @@ from libflagship.pppp import (
     PktDrwAck,
     PktLanSearch,
     PktSessionReady,
+    Type,
     Version,
     Xzyh,
 )
@@ -201,3 +205,23 @@ def test_pppp_open_configures_udp_socket_buffers(monkeypatch):
     assert (socket.SOL_SOCKET, socket.SO_RCVBUF, PPPP_SOCKET_RCVBUF) in created[0].calls
     assert (socket.SOL_SOCKET, socket.SO_SNDBUF, PPPP_SOCKET_SNDBUF) in created[0].calls
     assert (socket.SOL_SOCKET, socket.SO_BROADCAST, 1) in created[1].calls
+
+
+def test_pppp_remote_close_log_is_rate_limited(monkeypatch):
+    api = AnkerPPPPBaseApi(sock=SimpleNamespace(), duid=_duid(), addr=("127.0.0.1", 32108))
+    warnings = []
+
+    monkeypatch.setattr(
+        "libflagship.ppppapi.log.warning",
+        lambda message, *args: warnings.append(message % args if args else message),
+    )
+    times = iter([0.0, 1.0, 11.0])
+    monkeypatch.setattr("libflagship.ppppapi.time.monotonic", lambda: next(times))
+
+    for _ in range(3):
+        with pytest.raises(ConnectionResetError):
+            api.process(SimpleNamespace(type=Type.CLOSE))
+
+    assert len(warnings) == 2
+    assert warnings[0].startswith("PPPP: received CLOSE from remote peer")
+    assert warnings[1].endswith("(seen 3 times)")

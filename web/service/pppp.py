@@ -1,6 +1,7 @@
 import json
 import logging as log
 import threading
+import time
 
 from datetime import datetime, timedelta
 
@@ -17,6 +18,8 @@ import cli.pppp
 # a video/timelapse recovery. A slightly longer deadline avoids unnecessary
 # reconnect loops on otherwise healthy links.
 _CONNECT_DEADLINE_SEC = 8.0
+_REPEATED_LOG_COOLDOWN_SEC = 10.0
+_REPEATED_LOG_NOTICE_COUNT = 5
 
 
 def probe_pppp(config, printer_index) -> bool:
@@ -45,6 +48,7 @@ class PPPPService(Service):
         self.printer_index = 0 if printer_index is None else int(printer_index)
         self.xzyh_handlers = []
         self._handler_lock = threading.Lock()
+        self._log_repeat_state = {}
         super().__init__()
 
     @property
@@ -84,8 +88,27 @@ class PPPPService(Service):
         was_wanted = self.wanted
         super().stop()
         if was_wanted:
-            log.info("PPPPService: forcing socket close to expedite stop")
+            log.info("%s: forcing socket close to expedite stop", self.name)
             self._force_close_api()
+
+    def _log_repeated(self, level, key, message, *args, cooldown=_REPEATED_LOG_COOLDOWN_SEC):
+        now = time.monotonic()
+        state = self._log_repeat_state.get(key)
+        if state is None:
+            self._log_repeat_state[key] = {"count": 1, "last_at": now}
+            log.log(level, message, *args)
+            return
+
+        state["count"] += 1
+        if (
+            (now - state["last_at"]) < cooldown
+            and (state["count"] % _REPEATED_LOG_NOTICE_COUNT) != 0
+        ):
+            return
+
+        state["last_at"] = now
+        formatted = message % args if args else message
+        log.log(level, "%s (seen %s times)", formatted, state["count"])
 
     def api_command(self, commandType, **kwargs):
         api = getattr(self, "_api", None)
@@ -119,6 +142,15 @@ class PPPPService(Service):
             dumpfile=app.config.get("pppp_dump"),
         )
         if not ip_addr:
+            self._log_repeated(
+                log.WARNING,
+                ("no_ip", printer_index, printer.p2p_duid),
+                "%s: PPPP connect aborted because no printer IP was resolved "
+                "(printer=%s, duid=%s)",
+                self.name,
+                printer.name,
+                printer.p2p_duid,
+            )
             raise ConnectionRefusedError("No printer IP found; ensure printer is online on the same network")
 
         api = AnkerPPPPAsyncApi.open_lan(Duid.from_string(printer.p2p_duid), host=ip_addr)
@@ -128,21 +160,61 @@ class PPPPService(Service):
             pktwr = PacketWriter.open(dumpfile)
             api.set_dumper(pktwr)
 
-        log.info(f"Trying connect to printer {printer.name} ({printer.p2p_duid}) over pppp using ip {ip_addr}")
+        started_at = datetime.now()
+        self._log_repeated(
+            log.INFO,
+            ("connect_attempt", printer_index, ip_addr),
+            "%s: trying connect to printer %s (%s) over pppp using ip %s "
+            "(deadline=%.1fs)",
+            self.name,
+            printer.name,
+            printer.p2p_duid,
+            ip_addr,
+            _CONNECT_DEADLINE_SEC,
+        )
 
         api.connect_lan_search()
 
         while api.state != PPPPState.Connected:
             remaining = (deadline - datetime.now()).total_seconds()
             if remaining <= 0:
+                elapsed = (datetime.now() - started_at).total_seconds()
+                self._log_repeated(
+                    log.WARNING,
+                    ("connect_timeout", printer_index, ip_addr),
+                    "%s: PPPP connection timed out after %.1fs "
+                    "(printer=%s, ip=%s, state=%s)",
+                    self.name,
+                    elapsed,
+                    printer.name,
+                    ip_addr,
+                    getattr(api, "state", None),
+                )
                 raise ConnectionRefusedError("Connection rejected by device")
             try:
                 msg = api.recv(timeout=remaining)
                 api.process(msg)
             except ConnectionResetError:
+                elapsed = (datetime.now() - started_at).total_seconds()
+                self._log_repeated(
+                    log.WARNING,
+                    ("connect_reset", printer_index, ip_addr),
+                    "%s: PPPP connection reset after %.1fs "
+                    "(printer=%s, ip=%s)",
+                    self.name,
+                    elapsed,
+                    printer.name,
+                    ip_addr,
+                )
                 raise ConnectionRefusedError("Connection rejected by device")
 
-        log.info("Established pppp connection")
+        elapsed = (datetime.now() - started_at).total_seconds()
+        log.info(
+            "%s: established pppp connection to %s in %.1fs",
+            self.name,
+            printer.name,
+            elapsed,
+        )
         self._api = api
 
     def _drain_xzyh(self, chan):

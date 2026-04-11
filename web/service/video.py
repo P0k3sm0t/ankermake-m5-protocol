@@ -96,6 +96,25 @@ class VideoQueue(Service):
     def _sync_persistent_state(self):
         self.persistent = self._video_requested()
 
+    def _recovery_state_details(self, pppp=None):
+        pppp = pppp if pppp is not None else getattr(self, "pppp", None)
+        pppp_service = getattr(getattr(app, "svc", None), "svcs", {}).get(self._pppp_service_name())
+        pppp_service_state = getattr(pppp_service, "state", None)
+        return (
+            f"printer_index={self._service_printer_index()}, "
+            f"video_enabled={bool(getattr(self, 'video_enabled', False))}, "
+            f"timelapse_enabled={bool(getattr(self, 'timelapse_enabled', False))}, "
+            f"viewers={int(getattr(self, '_viewer_count', 0))}, "
+            f"wanted={bool(getattr(self, 'wanted', False))}, "
+            f"live_active={bool(getattr(self, '_live_active', False))}, "
+            f"api_id={'set' if getattr(self, 'api_id', None) is not None else 'none'}, "
+            f"pppp_connected={bool(getattr(pppp, 'connected', False))}, "
+            f"pppp_api={'set' if getattr(pppp, '_api', None) is not None else 'none'}, "
+            f"pppp_ref_held={bool(getattr(self, '_pppp_ref_held', False))}, "
+            f"awaiting_recycle={bool(getattr(self, '_awaiting_pppp_recycle', False))}, "
+            f"pppp_service_state={pppp_service_state}"
+        )
+
     def _clear_live_state(self):
         self._pending_disable = False
         self._live_active = False
@@ -113,7 +132,11 @@ class VideoQueue(Service):
             return True
         self._clear_live_state()
         if self._viewer_count > 0:
-            log.info(f"VideoQueue: disabling video; stopping service with {self._viewer_count} video client(s) connected")
+            log.info(
+                "%s: disabling video; stopping service with %s video client(s) connected",
+                self.name,
+                self._viewer_count,
+            )
         if self.state in (RunState.Starting, RunState.Running):
             self.stop()
         elif self.state in (RunState.Stopping, RunState.Stopped):
@@ -125,7 +148,7 @@ class VideoQueue(Service):
             return False
         live_auth = self._live_auth_data()
         if not live_auth:
-            log.warning("VideoQueue: cannot start live view because live auth data is missing")
+            log.warning("%s: cannot start live view because live auth data is missing", self.name)
             return False
         self.pppp.api_command(P2PSubCmdType.START_LIVE, data={
             "encryptkey": live_auth["encryptkey"],
@@ -153,7 +176,7 @@ class VideoQueue(Service):
                     "accountId": account_id,
                 }
         except Exception as exc:
-            log.warning(f"VideoQueue: failed to load live auth data: {exc}")
+            log.warning("%s: failed to load live auth data: %s", self.name, exc)
             return None
 
     def api_stop_live(self):
@@ -169,7 +192,7 @@ class VideoQueue(Service):
         self.pppp.api_command(P2PSubCmdType.LIGHT_STATE_SWITCH, data={
             "open": light,
         })
-        log.info(f"VideoQueue: light {'on' if light else 'off'}")
+        log.info("%s: light %s", self.name, "on" if light else "off")
         return True
 
     def api_video_mode(self, mode):
@@ -216,7 +239,7 @@ class VideoQueue(Service):
             return
 
         if msg.cmd != P2PCmdType.APP_CMD_VIDEO_FRAME:
-            log.debug(f"VideoQueue: ignoring non-video XZYH command {msg.cmd!r}")
+            log.debug("%s: ignoring non-video XZYH command %r", self.name, msg.cmd)
             return
 
         self.last_frame_at = time.monotonic()
@@ -232,7 +255,7 @@ class VideoQueue(Service):
 
         now = time.monotonic()
         if not force and self._live_active and (now - self._last_start_live_at) < 10.0:
-            log.info("VideoQueue: START_LIVE suppressed (already active recently)")
+            log.info("%s: START_LIVE suppressed (already active recently)", self.name)
             return False
 
         self._last_start_live_at = now
@@ -241,7 +264,12 @@ class VideoQueue(Service):
         self._last_no_frame_log_at = 0.0
         self._last_live_refresh_at = 0.0
 
-        log.info("VideoQueue: calling api_start_live()")
+        log.info(
+            "%s: calling api_start_live() (force=%s) [%s]",
+            self.name,
+            force,
+            self._recovery_state_details(self.pppp),
+        )
         if not self.api_start_live():
             return False
 
@@ -292,9 +320,9 @@ class VideoQueue(Service):
                     return None
 
                 if stuck_after_forced_recycle and not effectively_stopped:
-                    log.warning("VideoQueue: PPPP stop is stuck after forced recycle; marking service reusable")
+                    log.warning("%s: PPPP stop is stuck after forced recycle; marking service reusable", self.name)
 
-                log.info("VideoQueue: PPPP recycle is effectively complete; proceeding with fresh reacquire")
+                log.info("%s: PPPP recycle is effectively complete; proceeding with fresh reacquire", self.name)
                 # The old PPPP worker can get wedged after a video freeze.
                 # Replace the managed PPPP service with a fresh instance so a
                 # new connection attempt is guaranteed to start from a clean
@@ -304,7 +332,7 @@ class VideoQueue(Service):
 
             self._awaiting_pppp_recycle = False
             self._pppp_recycle_requested_at = None
-            log.info("VideoQueue: PPPP recycle completed; reacquiring fresh PPPP session")
+            log.info("%s: PPPP recycle completed; reacquiring fresh PPPP session", self.name)
 
         # Important: during a recycle handoff, do not block waiting for PPPP to
         # become ready. Borrow it in non-ready mode and let worker_start/
@@ -341,7 +369,11 @@ class VideoQueue(Service):
     def request_live_recovery(self, reason="manual recovery", force_pppp_recycle=False):
         """Ask the worker thread to refresh the live stream for a stalled client."""
         if not self._video_requested():
-            log.debug("VideoQueue: ignoring live recovery request because video is not requested")
+            log.debug(
+                "%s: ignoring live recovery request because video is not requested [%s]",
+                self.name,
+                self._recovery_state_details(),
+            )
             return False
 
         now = time.monotonic()
@@ -349,12 +381,25 @@ class VideoQueue(Service):
             getattr(self, "_manual_recovery_requested", False)
             and (now - getattr(self, "_manual_recovery_requested_at", 0.0)) < _EXTERNAL_RECOVERY_COOLDOWN
         ):
+            log.debug(
+                "%s: coalescing recovery request (%s) because another recovery is already queued [%s]",
+                self.name,
+                reason,
+                self._recovery_state_details(),
+            )
             return False
 
         self._manual_recovery_requested = True
         self._manual_recovery_reason = str(reason or "manual recovery").strip() or "manual recovery"
         self._manual_recovery_force_pppp = bool(force_pppp_recycle)
         self._manual_recovery_requested_at = now
+        log.info(
+            "%s: queued recovery request (%s, force_pppp_recycle=%s) [%s]",
+            self.name,
+            self._manual_recovery_reason,
+            self._manual_recovery_force_pppp,
+            self._recovery_state_details(),
+        )
 
         if self.state == RunState.Stopped and not self.wanted:
             self.start()
@@ -379,15 +424,20 @@ class VideoQueue(Service):
             or getattr(pppp, "_api", None) is None
             or getattr(self, "api_id", None) is None
         ):
-            log.warning(f"VideoQueue: {reason}; recycling PPPP in place")
+            log.warning(
+                "%s: %s; recycling PPPP in place [%s]",
+                self.name,
+                reason,
+                self._recovery_state_details(pppp),
+            )
             self._recycle_pppp_in_place()
             return True
 
         self._attempt_stall_recovery(
             pppp,
-            f"VideoQueue: {reason}; refreshing live stream",
-            f"VideoQueue: failed recovery request ({reason})",
-            f"Video recovery request exhausted ({reason})",
+            f"{self.name}: {reason}; refreshing live stream",
+            f"{self.name}: failed recovery request ({reason})",
+            f"{self.name}: video recovery request exhausted ({reason})",
         )
         return True
 
@@ -398,7 +448,11 @@ class VideoQueue(Service):
         websocket/JMuxer pipeline on every hard video recovery.
         """
         if not self._video_requested() or not self.wanted:
-            log.info("VideoQueue: PPPP recycle skipped because video was disabled")
+            log.info(
+                "%s: PPPP recycle skipped because video was disabled [%s]",
+                self.name,
+                self._recovery_state_details(),
+            )
             return
 
         self._in_place_recovery = True
@@ -415,10 +469,14 @@ class VideoQueue(Service):
                         if self._handler in old_pppp.xzyh_handlers:
                             old_pppp.xzyh_handlers.remove(self._handler)
                 except Exception as exc:
-                    log.debug(f"VideoQueue: failed detaching handler during in-place recovery: {exc}")
+                    log.debug("%s: failed detaching handler during in-place recovery: %s", self.name, exc)
 
             if self._pppp_ref_held:
-                log.info("VideoQueue: recycling PPPP in place for video recovery")
+                log.info(
+                    "%s: recycling PPPP in place for video recovery [%s]",
+                    self.name,
+                    self._recovery_state_details(),
+                )
                 self._awaiting_pppp_recycle = True
                 self._pppp_recycle_requested_at = time.monotonic()
                 app.svc.put(self._pppp_service_name())
@@ -433,7 +491,11 @@ class VideoQueue(Service):
             self._last_no_frame_log_at = 0.0
             self._last_live_refresh_at = 0.0
             self._stall_retry_count = 0
-            log.info("VideoQueue: PPPP recycle requested in place; waiting for clean stop before reacquire")
+            log.info(
+                "%s: PPPP recycle requested in place; waiting for clean stop before reacquire [%s]",
+                self.name,
+                self._recovery_state_details(),
+            )
         finally:
             self._in_place_recovery = False
 
@@ -444,15 +506,15 @@ class VideoQueue(Service):
 
         self.pppp = self._ensure_pppp_ready()
         if not self.pppp:
-            log.debug("VideoQueue: PPPP not available yet in worker_start")
+            log.debug("%s: PPPP not available yet in worker_start", self.name)
             self.api_id = None
             return
         if not getattr(self.pppp, "connected", False):
-            log.debug("VideoQueue: PPPP exists but is not connected yet in worker_start")
+            log.debug("%s: PPPP exists but is not connected yet in worker_start", self.name)
             self.api_id = None
             return
         if getattr(self.pppp, "_api", None) is None:
-            log.debug("VideoQueue: PPPP connected but API not ready yet in worker_start")
+            log.debug("%s: PPPP connected but API not ready yet in worker_start", self.name)
             self.api_id = None
             return
 
@@ -490,7 +552,7 @@ class VideoQueue(Service):
                 time.sleep(0.1)
                 return
             if not self.pppp:
-                log.debug("VideoQueue: PPPP not available yet")
+                log.debug("%s: PPPP not available yet", self.name)
                 time.sleep(0.5)
                 return
 
@@ -505,13 +567,13 @@ class VideoQueue(Service):
             return
 
         if not getattr(pppp, "connected", False):
-            log.debug("VideoQueue: PPPP exists but is not connected yet")
+            log.debug("%s: PPPP exists but is not connected yet", self.name)
             time.sleep(0.5)
             return
 
         if getattr(self, "api_id", None) is None:
             if getattr(pppp, "_api", None) is None:
-                log.debug("VideoQueue: PPPP connected but API not ready yet")
+                log.debug("%s: PPPP connected but API not ready yet", self.name)
                 time.sleep(0.5)
                 return
 
@@ -522,7 +584,7 @@ class VideoQueue(Service):
 
             started = self._start_live_if_needed(force=False)
             if not started:
-                log.info("VideoQueue: Failed to start live view during late init")
+                log.info("%s: failed to start live view during late init", self.name)
                 time.sleep(0.5)
                 return
 
@@ -536,7 +598,7 @@ class VideoQueue(Service):
             elif self.saved_video_mode is not None:
                 self.api_video_mode(self.saved_video_mode)
 
-            log.info("VideoQueue: Live video started after PPPP became ready")
+            log.info("%s: live video started after PPPP became ready", self.name)
             return
 
         if getattr(pppp, "_api", None) is None:
@@ -553,9 +615,9 @@ class VideoQueue(Service):
                     if now - self._last_live_refresh_at >= _LIVE_REFRESH_COOLDOWN:
                         self._attempt_stall_recovery(
                             pppp,
-                            f"VideoQueue: No video frames for {gap:.1f}s; restarting live stream",
-                            "VideoQueue: Failed to restart live stream",
-                            "Video stall recovery exhausted",
+                            f"{self.name}: No video frames for {gap:.1f}s; restarting live stream",
+                            f"{self.name}: Failed to restart live stream",
+                            f"{self.name}: Video stall recovery exhausted",
                         )
                     time.sleep(0.5)
                     return
@@ -563,14 +625,14 @@ class VideoQueue(Service):
                 since_start = now - self._live_started_at
                 if since_start > _INITIAL_FRAME_TIMEOUT:
                     if now - self._last_no_frame_log_at >= 10.0:
-                        log.info(f"VideoQueue: No initial frame yet after {since_start:.1f}s; waiting")
+                        log.info("%s: no initial frame yet after %.1fs; waiting", self.name, since_start)
                         self._last_no_frame_log_at = now
                     if now - self._last_live_refresh_at >= _LIVE_REFRESH_COOLDOWN:
                         self._attempt_stall_recovery(
                             pppp,
-                            "VideoQueue: Re-requesting live stream (no initial frame)",
-                            "VideoQueue: Failed to restart live stream for initial-frame recovery",
-                            "Video stall recovery exhausted (no initial frame)",
+                            f"{self.name}: Re-requesting live stream (no initial frame)",
+                            f"{self.name}: Failed to restart live stream for initial-frame recovery",
+                            f"{self.name}: Video stall recovery exhausted (no initial frame)",
                         )
                     time.sleep(0.5)
                     return
@@ -586,29 +648,29 @@ class VideoQueue(Service):
         self._last_live_refresh_at = time.monotonic()
         self._stall_retry_count += 1
         attempt = self._stall_retry_count
-        log.warning(f"{warn_msg} (attempt {attempt}/{_STALL_MAX_RETRIES})")
+        log.warning("%s (attempt %s/%s)", warn_msg, attempt, _STALL_MAX_RETRIES)
         try:
             self._live_active = False
             self.api_stop_live()
             time.sleep(0.25)
             if not self._video_requested() or not self.wanted:
-                log.info("VideoQueue: live refresh cancelled because video was disabled")
+                log.info("%s: live refresh cancelled because video was disabled", self.name)
                 return
             if not pppp or not getattr(pppp, "connected", False):
-                log.warning("VideoQueue: PPPP unavailable during live refresh")
+                log.warning("%s: PPPP unavailable during live refresh", self.name)
                 if attempt >= _STALL_MAX_RETRIES:
                     raise ServiceRestartSignal(exhaust_msg)
                 time.sleep(0.25)
                 return
             if not self._start_live_if_needed(force=True):
-                log.warning(f"{retry_fail_msg} (attempt {attempt}/{_STALL_MAX_RETRIES})")
+                log.warning("%s (attempt %s/%s)", retry_fail_msg, attempt, _STALL_MAX_RETRIES)
             if attempt >= _STALL_MAX_RETRIES:
-                log.warning(f"{exhaust_msg}; recycling PPPP in place")
+                log.warning("%s; recycling PPPP in place", exhaust_msg)
                 self._recycle_pppp_in_place()
         except ServiceRestartSignal:
             raise
         except Exception as exc:
-            log.warning(f"VideoQueue: Failed to refresh live stream ({exc})")
+            log.warning("%s: failed to refresh live stream (%s)", self.name, exc)
 
     def worker_stop(self):
         try:
@@ -624,20 +686,20 @@ class VideoQueue(Service):
         release_pppp = (not self.wanted) or (not self._video_requested()) or getattr(app.svc, "shutting_down", False) or self._recycle_pppp_on_restart
         if self.pppp and self._pppp_ref_held and release_pppp:
             if self._recycle_pppp_on_restart:
-                log.info("VideoQueue: releasing PPPP so it can be recycled for video recovery")
+                log.info("%s: releasing PPPP so it can be recycled for video recovery", self.name)
                 self._awaiting_pppp_recycle = True
             app.svc.put(self._pppp_service_name())
             self._pppp_ref_held = False
             self.pppp = None
         elif self.pppp and self._pppp_ref_held:
-            log.info("VideoQueue: keeping PPPP borrowed across video worker restart")
+            log.info("%s: keeping PPPP borrowed across video worker restart", self.name)
 
         self._live_active = False
         self._last_start_live_at = 0.0
         self.api_id = None
         self._live_started_at = None
         if self._recycle_pppp_on_restart and self.wanted and self._video_requested():
-            log.info("VideoQueue: PPPP will be reacquired on the next worker start")
+            log.info("%s: PPPP will be reacquired on the next worker start", self.name)
         self._recycle_pppp_on_restart = False
 
 
@@ -649,10 +711,10 @@ class VideoQueue(Service):
         if self._viewer_count > 0:
             self._viewer_count -= 1
         if self._viewer_count == 0 and self._pending_disable:
-            log.info("VideoQueue: last viewer disconnected; clearing stale deferred disable")
+            log.info("%s: last viewer disconnected; clearing stale deferred disable", self.name)
             self._pending_disable = False
         elif self._viewer_count == 0 and not self._video_requested() and self.state == RunState.Running:
-            log.info("VideoQueue: last viewer disconnected; stopping disabled video service")
+            log.info("%s: last viewer disconnected; stopping disabled video service", self.name)
             self.stop()
         return self._viewer_count
 
@@ -676,7 +738,7 @@ class VideoQueue(Service):
         self._sync_persistent_state()
         if self._video_requested():
             if was_enabled and self._viewer_count > 0:
-                log.info("VideoQueue: live view disabled; keeping stream active for timelapse")
+                log.info("%s: live view disabled; keeping stream active for timelapse", self.name)
             return True
         if not was_enabled and not self._pending_disable:
             return True

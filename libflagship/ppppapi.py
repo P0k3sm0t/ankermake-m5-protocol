@@ -23,6 +23,7 @@ PPPP_LAN_PORT = 32108
 PPPP_WAN_PORT = 32100
 PPPP_SOCKET_RCVBUF = 1024 * 1024
 PPPP_SOCKET_SNDBUF = 256 * 1024
+_REMOTE_CLOSE_LOG_COOLDOWN = 10.0
 
 
 def _configure_udp_socket(sock, *, broadcast=False):
@@ -331,6 +332,8 @@ class AnkerPPPPBaseApi(Thread):
         self.running = True
         self.stopped = Event()
         self.dumper = None
+        self._remote_close_log_at = 0.0
+        self._remote_close_count = 0
 
     @classmethod
     def open(cls, duid, host, port):
@@ -391,7 +394,23 @@ class AnkerPPPPBaseApi(Thread):
     def process(self, msg):
 
         if msg.type == Type.CLOSE:
-            log.error("CLOSE")
+            now = time.monotonic()
+            self._remote_close_count += 1
+            if (
+                self._remote_close_count == 1
+                or (now - self._remote_close_log_at) >= _REMOTE_CLOSE_LOG_COOLDOWN
+            ):
+                self._remote_close_log_at = now
+                suffix = ""
+                if self._remote_close_count > 1:
+                    suffix = f" (seen {self._remote_close_count} times)"
+                log.warning(
+                    "PPPP: received CLOSE from remote peer (addr=%s, duid=%s, state=%s)%s",
+                    getattr(self, "addr", None),
+                    getattr(self, "duid", None),
+                    getattr(self, "state", None),
+                    suffix,
+                )
             raise ConnectionResetError
 
         elif msg.type == Type.REPORT_SESSION_READY:
