@@ -642,6 +642,7 @@ def test_timelapse_routes_list_download_delete_and_reject_traversal(tmp_path):
         delete_snapshot=lambda collection_id, filename: (
             collection_id == "cube_capture" and filename == "frame_00000.jpg"
         ),
+        delete_snapshot_collection=lambda collection_id: collection_id == "cube_capture",
     )
     mqtt = SimpleNamespace(timelapse=timelapse)
     client = app.test_client()
@@ -656,6 +657,7 @@ def test_timelapse_routes_list_download_delete_and_reject_traversal(tmp_path):
         invalid_snapshot = client.get("/api/timelapse-snapshot/..\\\\bad/frame_00000.jpg", headers={"X-Api-Key": API_KEY})
         snapshot_downloaded = client.get("/api/timelapse-snapshot/cube_capture/frame_00000.jpg", headers={"X-Api-Key": API_KEY})
         snapshot_deleted = client.delete("/api/timelapse-snapshot/cube_capture/frame_00000.jpg", headers={"X-Api-Key": API_KEY})
+        collection_deleted = client.delete("/api/timelapse-snapshot/cube_capture", headers={"X-Api-Key": API_KEY})
     finally:
         _restore_app_state(old_values, old_svc)
 
@@ -671,6 +673,7 @@ def test_timelapse_routes_list_download_delete_and_reject_traversal(tmp_path):
     assert snapshot_downloaded.status_code == 200
     assert snapshot_downloaded.data == b"fake-jpg"
     assert snapshot_deleted.status_code == 200
+    assert collection_deleted.status_code == 200
 
 
 def test_timelapse_media_routes_honor_requested_printer_index(tmp_path):

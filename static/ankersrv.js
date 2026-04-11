@@ -3889,6 +3889,30 @@ $(function () {
         return _timelapseSnapshotCollections.find(collection => collection.id === id) || null;
     }
 
+    function configureTimelapseSnapshotDeleteButton(mode, options = {}) {
+        const deleteBtn = document.getElementById("timelapse-snapshot-delete");
+        if (!deleteBtn) return;
+
+        const enabled = options.enabled === true;
+        deleteBtn.disabled = !enabled;
+        deleteBtn.dataset.mode = mode || "frame";
+        deleteBtn.innerHTML = mode === "collection"
+            ? '<i class="bi bi-trash"></i> Discard Capture'
+            : '<i class="bi bi-trash"></i> Delete';
+
+        if (options.collectionId) {
+            deleteBtn.dataset.collection = options.collectionId;
+        } else {
+            deleteBtn.removeAttribute("data-collection");
+        }
+
+        if (options.filename) {
+            deleteBtn.dataset.file = options.filename;
+        } else {
+            deleteBtn.removeAttribute("data-file");
+        }
+    }
+
     function clearTimelapseSnapshotPreview(message) {
         const imageEl = document.getElementById("timelapse-snapshot-image");
         const placeholder = document.getElementById("timelapse-snapshot-placeholder");
@@ -3925,11 +3949,7 @@ $(function () {
             downloadEl.setAttribute("href", "#");
             downloadEl.removeAttribute("download");
         }
-        if (deleteBtn) {
-            deleteBtn.disabled = true;
-            deleteBtn.removeAttribute("data-collection");
-            deleteBtn.removeAttribute("data-file");
-        }
+        configureTimelapseSnapshotDeleteButton("frame", { enabled: false });
     }
 
     function getSnapshotCollectionStateSuffix(collection) {
@@ -4008,6 +4028,8 @@ $(function () {
                 statusEl.textContent = `${collection.frame_count} frame(s) available in this capture.`;
             } else if (collection.state === "capturing") {
                 statusEl.textContent = "This capture is still running. Frames are view-only until the timelapse finishes.";
+            } else if (collection.state === "resume_pending") {
+                statusEl.textContent = "This paused capture is still resumable. Use Discard Capture if you want to remove it.";
             } else {
                 statusEl.textContent = "This capture is still resumable. Frames are view-only until the timelapse is finalized.";
             }
@@ -4033,10 +4055,17 @@ $(function () {
             );
             downloadEl.setAttribute("download", frame.filename);
         }
-        if (deleteBtn) {
-            deleteBtn.disabled = !collection.allow_delete;
-            deleteBtn.dataset.collection = collection.id;
-            deleteBtn.dataset.file = frame.filename;
+        if (collection.state === "resume_pending") {
+            configureTimelapseSnapshotDeleteButton("collection", {
+                enabled: true,
+                collectionId: collection.id,
+            });
+        } else {
+            configureTimelapseSnapshotDeleteButton("frame", {
+                enabled: !!collection.allow_delete,
+                collectionId: collection.id,
+                filename: frame.filename,
+            });
         }
     }
 
@@ -4371,26 +4400,42 @@ $(function () {
 
     $("#timelapse-snapshot-delete").on("click", async function () {
         const btn = $(this);
+        const mode = String(btn.data("mode") || "frame");
         const collectionId = btn.data("collection");
         const filename = btn.data("file");
         const collection = getTimelapseSnapshotCollection(collectionId);
-        if (!collectionId || !filename || !collection || !collection.allow_delete) {
-            return;
+        if (!collectionId || !collection) return;
+
+        let requestUrl = null;
+        let successMessage = null;
+        let confirmMessage = null;
+
+        if (mode === "collection") {
+            confirmMessage = `Discard paused capture ${collection.label || collection.id}?`;
+            requestUrl = withActivePrinterQuery(
+                `/api/timelapse-snapshot/${encodeURIComponent(collectionId)}`
+            );
+            successMessage = `Discarded paused capture ${collection.label || collection.id}.`;
+        } else {
+            if (!filename || !collection.allow_delete) {
+                return;
+            }
+            confirmMessage = `Delete snapshot ${filename}?`;
+            requestUrl = withActivePrinterQuery(
+                `/api/timelapse-snapshot/${encodeURIComponent(collectionId)}/${encodeURIComponent(filename)}`
+            );
+            successMessage = `Deleted snapshot ${filename}.`;
         }
-        if (!confirm(`Delete snapshot ${filename}?`)) return;
+
+        if (!confirm(confirmMessage)) return;
         btn.prop("disabled", true);
         try {
-            const resp = await fetch(
-                withActivePrinterQuery(
-                    `/api/timelapse-snapshot/${encodeURIComponent(collectionId)}/${encodeURIComponent(filename)}`
-                ),
-                { method: "DELETE" }
-            );
+            const resp = await fetch(requestUrl, { method: "DELETE" });
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok) {
                 throw new Error(data.error || `HTTP ${resp.status}`);
             }
-            flash_message(`Deleted snapshot ${filename}.`, "success", 4000);
+            flash_message(successMessage, "success", 4000);
             await loadTimelapseSnapshots();
         } catch (err) {
             flash_message(`Snapshot delete failed: ${err.message || err}`, "danger", 6000);

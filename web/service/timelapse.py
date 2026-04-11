@@ -1248,6 +1248,53 @@ class TimelapseService:
         log.info(f"Timelapse: deleted snapshot {filename} from {collection_id}")
         return True
 
+    def delete_snapshot_collection(self, collection_id):
+        """Delete an entire snapshot collection.
+
+        Archived and manual collections are removed immediately.
+        A resumable paused capture may also be discarded here so it does not
+        stay stuck in the Snapshots tab with no cleanup path.
+        Active in-progress captures remain protected.
+        """
+        safe_collection = self._safe_path_component(collection_id)
+        if not safe_collection:
+            return False
+
+        with self._lock:
+            current_collection = (
+                os.path.basename(self._current_dir)
+                if self._current_dir and os.path.isdir(self._current_dir)
+                else None
+            )
+            if current_collection == safe_collection:
+                raise RuntimeError("Cannot delete snapshots from an active timelapse capture")
+
+            resume_collection = (
+                os.path.basename(self._resume_dir)
+                if self._resume_dir and os.path.isdir(self._resume_dir)
+                else None
+            )
+            if resume_collection == safe_collection:
+                log.info(f"Timelapse: discarded paused capture collection {safe_collection}")
+                self._cancel_pending_resume()
+                self._automatic_pause_reason = None
+                self._manual_pause_requested = False
+                self._capture_pause_reason = None
+                self._recovery_active = False
+                self._recovery_reason = None
+                self._disable_video_for_timelapse()
+                return True
+
+        dir_path, read_only = self._resolve_snapshot_collection_dir(safe_collection)
+        if not dir_path:
+            return False
+        if read_only:
+            raise RuntimeError("Cannot delete snapshots from an active timelapse capture")
+
+        shutil.rmtree(dir_path, ignore_errors=True)
+        log.info(f"Timelapse: deleted snapshot collection {safe_collection}")
+        return True
+
     def _snapshot_collection_dirs_for_video(self, filename):
         safe_video = self._safe_path_component(filename)
         if not safe_video:

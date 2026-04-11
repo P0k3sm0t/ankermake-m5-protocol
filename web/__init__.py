@@ -3837,6 +3837,26 @@ def app_api_timelapse_snapshot_download(collection_id, filename):
     )
 
 
+@app.delete("/api/timelapse-snapshot/<collection_id>")
+def app_api_timelapse_snapshot_collection_delete(collection_id):
+    """Delete a snapshot collection or discard a resumable paused capture."""
+    if "/" in collection_id or "\\" in collection_id or ".." in collection_id:
+        return jsonify({"error": "invalid filename"}), 400
+
+    printer_index = _requested_printer_index()
+    with borrow_mqtt(printer_index) as mqtt:
+        if not mqtt:
+            return {"error": "Service unavailable"}, 503
+        try:
+            deleted = mqtt.timelapse.delete_snapshot_collection(collection_id)
+        except RuntimeError as exc:
+            return {"error": str(exc)}, 409
+
+    if not deleted:
+        return {"error": "Snapshot collection not found"}, 404
+    return {"status": "ok"}
+
+
 @app.delete("/api/timelapse-snapshot/<collection_id>/<filename>")
 def app_api_timelapse_snapshot_delete(collection_id, filename):
     """Delete an archived timelapse snapshot JPG."""

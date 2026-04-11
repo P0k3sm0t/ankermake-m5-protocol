@@ -107,6 +107,30 @@ def test_timelapse_snapshot_helpers_list_download_and_delete(tmp_path):
     assert not archived_dir.exists()
 
 
+def test_timelapse_can_discard_resume_pending_snapshot_collection(tmp_path):
+    cfg = FakeConfigManager(tmp_path)
+    svc = TimelapseService(cfg, captures_dir=tmp_path)
+
+    resume_dir = tmp_path / _IN_PROGRESS_SUBDIR / "cube_resume"
+    resume_dir.mkdir(parents=True)
+    (resume_dir / "frame_00000.jpg").write_bytes(b"resume")
+    svc._write_meta(resume_dir, "cube.gcode", 1)
+    svc._resume_dir = str(resume_dir)
+    svc._resume_filename = "cube.gcode"
+    svc._resume_frame_count = 1
+
+    collections = svc.list_snapshots()
+    assert collections[0]["id"] == "cube_resume"
+    assert collections[0]["state"] == "resume_pending"
+    assert collections[0]["allow_delete"] is False
+
+    assert svc.delete_snapshot_collection("cube_resume") is True
+    assert not resume_dir.exists()
+    assert svc._resume_dir is None
+    assert svc._resume_filename is None
+    assert svc._resume_frame_count == 0
+
+
 def test_timelapse_manual_snapshot_save_list_and_delete(tmp_path):
     cfg = FakeConfigManager(tmp_path)
     svc = TimelapseService(cfg, captures_dir=tmp_path)
