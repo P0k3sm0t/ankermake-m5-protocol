@@ -17,6 +17,7 @@ log = logging.getLogger("history")
 
 _DEFAULT_RETENTION_DAYS = 90
 _DEFAULT_MAX_ENTRIES = 500
+_PENDING_ARCHIVE_GRACE_SECONDS = 60 * 60
 
 _PLACEHOLDER_NAMES = frozenset({"unknown", "unknown.gcode", ""})
 
@@ -287,6 +288,7 @@ class PrintHistory:
         archive_dir = self._archive_dir
         if not archive_dir or not os.path.isdir(archive_dir):
             return
+        now_ts = datetime.now(timezone.utc).timestamp()
         keep = {
             row[0]
             for row in conn.execute(
@@ -305,11 +307,29 @@ class PrintHistory:
             path = os.path.join(archive_dir, name)
             try:
                 if os.path.isfile(path):
+                    age_seconds = max(0.0, now_ts - os.path.getmtime(path))
+                    if age_seconds < _PENDING_ARCHIVE_GRACE_SECONDS:
+                        continue
                     os.unlink(path)
             except FileNotFoundError:
                 continue
             except Exception as exc:
                 log.warning(f"History: could not delete unreferenced archive {path}: {exc}")
+
+    def _delete_archive_relpaths(self, archive_relpaths):
+        for archive_relpath in archive_relpaths or ():
+            if not archive_relpath:
+                continue
+            for relpath in (archive_relpath, self._thumbnail_relpath(archive_relpath)):
+                path = self._archive_abspath(relpath)
+                if not path:
+                    continue
+                try:
+                    os.unlink(path)
+                except FileNotFoundError:
+                    continue
+                except Exception as exc:
+                    log.warning(f"History: could not delete archive file {path}: {exc}")
 
     def record_start(self, filename, task_id=None, archive_relpath=None, archive_size=None, preview_url=None):
         """Record a print start. Returns the row id.
@@ -627,11 +647,33 @@ class PrintHistory:
         placeholders = ",".join("?" for _ in ids)
         with self._lock:
             with self._connect() as conn:
+                archive_relpaths = [
+                    row[0]
+                    for row in conn.execute(
+                        f"SELECT DISTINCT archive_relpath FROM print_history "
+                        f"WHERE id IN ({placeholders}) AND archive_relpath IS NOT NULL AND archive_relpath != ''",
+                        tuple(ids),
+                    ).fetchall()
+                    if row[0]
+                ]
                 cursor = conn.execute(
                     f"DELETE FROM print_history WHERE id IN ({placeholders})",
                     tuple(ids),
                 )
                 deleted = cursor.rowcount or 0
+                if archive_relpaths:
+                    still_referenced = {
+                        row[0]
+                        for row in conn.execute(
+                            "SELECT DISTINCT archive_relpath FROM print_history "
+                            f"WHERE archive_relpath IN ({','.join('?' for _ in archive_relpaths)})",
+                            tuple(archive_relpaths),
+                        ).fetchall()
+                        if row[0]
+                    }
+                    self._delete_archive_relpaths(
+                        [relpath for relpath in archive_relpaths if relpath not in still_referenced]
+                    )
                 self._delete_unreferenced_archives(conn)
                 conn.commit()
                 if deleted:

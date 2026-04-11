@@ -196,6 +196,40 @@ def test_history_entry_can_fallback_to_archive_from_same_task_id(tmp_path):
     assert history.get_archive_path(duplicate_id) is not None
 
 
+def test_recent_unclaimed_archive_survives_other_printer_prune(tmp_path):
+    db_path = tmp_path / "history.db"
+    history0 = PrintHistory(db_path=db_path, printer_index=0)
+    history1 = PrintHistory(db_path=db_path, printer_index=1)
+
+    archive0 = history0.archive_upload("thing1.gcode", b"G28\nM104 S200\n")
+    archive1 = history1.archive_upload("thing2.gcode", b"G28\nM104 S210\n")
+
+    archive0_path = history0._archive_abspath(archive0["archive_relpath"])
+    assert archive0_path is not None
+    assert os.path.exists(archive0_path)
+
+    history1.record_start(
+        "thing2.gcode",
+        task_id="thing2-task",
+        archive_relpath=archive1["archive_relpath"],
+        archive_size=archive1["archive_size"],
+    )
+
+    assert os.path.exists(archive0_path)
+
+    row0_id = history0.record_start(
+        "thing1.gcode",
+        task_id="thing1-task",
+        archive_relpath=archive0["archive_relpath"],
+        archive_size=archive0["archive_size"],
+    )
+    entry0 = history0.get_entry(row0_id)
+
+    assert entry0["archive_available"] is True
+    assert entry0["can_reprint"] is True
+    assert history0.get_archive_path(row0_id) is not None
+
+
 def test_history_clear_removes_archived_gcode_files(tmp_path):
     history = PrintHistory(db_path=tmp_path / "history.db")
 
