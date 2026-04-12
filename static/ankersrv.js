@@ -1926,39 +1926,51 @@ $(function () {
         (async () => {
             const form = $("#config-login-form");
             const url = form.attr("action");
+            const submitBtn = $("#login");
+            const originalButtonHtml = submitBtn.html();
 
             const form_data = new URLSearchParams();
             for (const pair of new FormData(form.get(0))) {
                 form_data.append(pair[0], pair[1]);
             }
 
-            const resp = await fetch(url, {
-                method: 'POST',
-                body: form_data
-            });
+            submitBtn.prop("disabled", true);
+            submitBtn.html('<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Working...');
 
-            if (resp.status < 300) {
-                const data = await resp.json();
-                const input = $("#loginCaptchaText");
-                if ("redirect" in data) {
-                    document.location = data["redirect"];
+            try {
+                const resp = await fetch(url, {
+                    method: 'POST',
+                    body: form_data
+                });
+
+                if (resp.status < 300) {
+                    const data = await resp.json();
+                    const input = $("#loginCaptchaText");
+                    if ("redirect" in data) {
+                        document.location = data["redirect"];
+                        return;
+                    }
+                    else if ("error" in data) {
+                        flash_message(data["error"], "danger");
+                        input.get(0).focus();
+                    }
+                    else if ("captcha_id" in data) {
+                        input.val("");
+                        input.attr("aria-required", "true");
+                        input.prop("required", true);
+                        input.get(0).focus();
+                        $("#loginCaptchaId").val(data["captcha_id"]);
+                        $("#loginCaptchaImg").attr("src", data["captcha_url"]);
+                        $("#captchaRow").show();
+                    }
                 }
-                else if ("error" in data) {
-                    flash_message(data["error"], "danger");
-                    input.get(0).focus();
-                }
-                else if ("captcha_id" in data) {
-                    input.val("");
-                    input.attr("aria-required", "true");
-                    input.prop("required", true);
-                    input.get(0).focus();
-                    $("#loginCaptchaId").val(data["captcha_id"]);
-                    $("#loginCaptchaImg").attr("src", data["captcha_url"]);
-                    $("#captchaRow").show();
+                else {
+                    flash_message(`HTTP Error ${resp.status}: ${resp.statusText}`, "danger")
                 }
             }
-            else {
-                flash_message(`HTTP Error ${resp.status}: ${resp.statusText}`, "danger")
+            finally {
+                submitBtn.prop("disabled", false);
+                submitBtn.html(originalButtonHtml);
             }
         })();
     });

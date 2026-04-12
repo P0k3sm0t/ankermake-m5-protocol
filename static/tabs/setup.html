@@ -127,31 +127,62 @@
                                                     </button>
                                                 </div>
                                             </div>
+                                            <div class="form-text mt-3">
+                                                A successful login shows a green confirmation banner with the account
+                                                email and printer count.
+                                            </div>
                                         </div>
                                     </div>
                                 </form>
-                                <form action="{{ url_for('app_api_ankerctl_config_upload') }}" method="POST"
-                                    enctype="multipart/form-data" class="mb-3" id="config-upload-form">
-                                    <div class="card">
-                                        <div class="card-header fs-4">
-                                            Upload AnkerMake Login File
-                                        </div>
+                                <div class="card mb-3">
+                                    <div class="card-header fs-4">
+                                        Import From eufyMake Studio
+                                    </div>
 
-                                        <div class="card-body input-group">
-                                            <input class="form-control" type="file" id="loginFile" name="login_file"
-                                                required aria-required="true" />
-                                            <button class="btn btn-secondary submit" type="submit" id="upload">
-                                                {{ macro.bi_icon("cloud-arrow-up-fill", "Upload") }}
+                                    <div class="card-body">
+                                        <div class="alert alert-info small mb-3">
+                                            Keep eufyMake Studio open and signed in before running this import.
+                                            ankerctl will automatically open the correct slicer cache file and import
+                                            from it. A successful import shows a green confirmation banner with the
+                                            account email and printer count.
+                                        </div>
+                                        <form action="{{ url_for('app_api_ankerctl_config_import_slicer') }}"
+                                            method="POST" class="mb-3">
+                                            <button class="btn btn-primary submit" type="submit" id="importFromSlicer">
+                                                {{ macro.bi_icon("magic", "Import From Open eufyMake Studio") }}
                                             </button>
-                                        </div>
+                                        </form>
 
-                                        <div class="card-footer mt-2">
+                                        <hr>
+
+                                        <div class="small text-body-secondary mb-2">
+                                            Manual fallback:
+                                        </div>
+                                        <form action="{{ url_for('app_api_ankerctl_config_upload') }}" method="POST"
+                                            enctype="multipart/form-data" id="config-upload-form">
+                                            <div class="input-group">
+                                                <input class="form-control" type="file" id="loginFile" name="login_file"
+                                                    required aria-required="true" />
+                                                <button class="btn btn-secondary submit" type="submit" id="upload">
+                                                    {{ macro.bi_icon("cloud-arrow-up-fill", "Upload File") }}
+                                                </button>
+                                            </div>
+                                        </form>
+                                    </div>
+
+                                    <div class="card-footer mt-2">
+                                        <div class="mb-2">
                                             Location: <code id="loginFilePath"
                                                 class="fw-lighter">{{ login_file_path }}</code>
                                             {{ macro.clipboard_button("#loginFilePath") }}
                                         </div>
+                                        <div class="small text-body-secondary">
+                                            For current Windows eufyMake Studio builds, keep the slicer open and
+                                            signed in while importing. If you browse manually, select one of the
+                                            <code>.ldb</code> files from the folder shown above.
+                                        </div>
                                     </div>
-                                </form>
+                                </div>
                             </div>
                             <div class="col-xl-5">
                                 <div class="card">

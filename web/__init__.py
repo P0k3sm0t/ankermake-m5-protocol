@@ -38,6 +38,7 @@ import threading
 import time
 from collections import deque
 from contextlib import contextmanager
+from types import SimpleNamespace
 
 log = logging.getLogger("web")
 
@@ -247,7 +248,7 @@ class _PrinterAlertBuffer:
 
 
 from secrets import token_urlsafe as token
-from flask import Flask, flash, request, render_template, Response, session, url_for, jsonify, has_request_context
+from flask import Flask, request, render_template, Response, session, url_for, jsonify, has_request_context
 from flask_sock import Sock
 from simple_websocket.errors import ConnectionClosed
 from user_agents import parse as user_agent_parse
@@ -1705,9 +1706,6 @@ def app_root():
     """
     config = app.config["config"]
     with config.open() as cfg:
-        user_agent = user_agent_parse(request.headers.get("User-Agent"))
-        user_os = web.platform.os_platform(user_agent.os.family)
-
         printers_list = []
         if cfg:
             anker_config = str(web.config.config_show(cfg))
@@ -1751,7 +1749,7 @@ def app_root():
             request_host=request_host,
             request_port=request_port,
             configure=app.config["login"],
-            login_file_path=web.platform.login_path(user_os),
+            login_file_path=web.platform.login_path(web.platform.current_platform()),
             anker_config=anker_config,
             config_existing_email=config_existing_email,
             country_codes=json.dumps(cli.countrycodes.country_codes),
@@ -1911,6 +1909,37 @@ def app_api_version():
     return {"api": "0.1", "server": "1.9.0", "text": "OctoPrint 1.9.0"}
 
 
+def _queue_post_reload_flash(message: str, category: str = "info"):
+    session["post_reload_flash"] = {"message": message, "category": category}
+
+
+def _config_import_status_message(action: str, source: str):
+    prefix = f"Configuration {action}"
+    if source:
+        prefix += f" from {source}"
+
+    try:
+        with app.config["config"].open() as cfg:
+            account = getattr(cfg, "account", None) if cfg else None
+            printers = list(getattr(cfg, "printers", []) or []) if cfg else []
+    except Exception:
+        return prefix + "."
+
+    details = []
+    email = getattr(account, "email", "") if account else ""
+    if email:
+        details.append(f"for {email}")
+
+    if printers:
+        printer_count = len(printers)
+        label = "printer" if printer_count == 1 else "printers"
+        details.append(f"with {printer_count} {label}")
+
+    if details:
+        return prefix + " " + " ".join(details) + "."
+    return prefix + "."
+
+
 @app.post("/api/ankerctl/config/upload")
 def app_api_ankerctl_config_upload():
     """
@@ -1926,14 +1955,49 @@ def app_api_ankerctl_config_upload():
     try:
         web.config.config_import(file, app.config["config"])
         session["authenticated"] = True
-        return web.util.flash_redirect(url_for('app_api_ankerctl_server_reload'),
-                                       "Configuration imported!", "success")
+        _queue_post_reload_flash(_config_import_status_message("imported", "selected login file"), "success")
+        return web.util.flash_redirect(url_for('app_api_ankerctl_server_reload'))
     except web.config.ConfigImportError as err:
         log.exception(f"Config import failed: {err}")
-        return web.util.flash_redirect(url_for('app_root'), "Config import failed. Check server logs for details.", "danger")
+        return web.util.flash_redirect(url_for('app_root'), f"Config import failed: {err}", "danger")
     except Exception as err:
         log.exception(f"Config import failed: {err}")
         return web.util.flash_redirect(url_for('app_root'), "An unexpected error occurred. Check server logs for details.", "danger")
+
+
+@app.post("/api/ankerctl/config/import-slicer")
+def app_api_ankerctl_config_import_slicer():
+    """
+    Auto-detect and import the active slicer login cache from the local machine.
+    """
+    login_path = web.platform.autodetect_login_path()
+    if not login_path:
+        return web.util.flash_redirect(
+            url_for('app_root'),
+            "Could not auto-detect the slicer cache. Make sure eufyMake Studio is open and signed in, then try again.",
+            "danger",
+        )
+
+    try:
+        with open(login_path, "rb") as fh:
+            web.config.config_import(SimpleNamespace(stream=fh), app.config["config"])
+        session["authenticated"] = True
+        _queue_post_reload_flash(_config_import_status_message("imported", "open eufyMake Studio"), "success")
+        return web.util.flash_redirect(url_for('app_api_ankerctl_server_reload'))
+    except web.config.ConfigImportError as err:
+        log.exception(f"Slicer cache import failed: {err}")
+        return web.util.flash_redirect(
+            url_for('app_root'),
+            f"Slicer cache import failed: {err}",
+            "danger",
+        )
+    except Exception as err:
+        log.exception(f"Slicer cache import failed: {err}")
+        return web.util.flash_redirect(
+            url_for('app_root'),
+            "An unexpected error occurred while importing from the slicer cache. Check server logs for details.",
+            "danger",
+        )
 
 
 @app.post("/api/ankerctl/config/login")
@@ -1944,31 +2008,32 @@ def app_api_ankerctl_config_login():
         if key not in form_data:
             return jsonify({"error": f"Error: Missing form entry '{key}'"})
 
-    if not cli.countrycodes.code_to_country(form_data["login_country"]):
-        return jsonify({"error": f"Error: Invalid country code '{form_data['login_country']}'"})
+    login_email = (form_data.get("login_email") or "").strip()
+    login_country = (form_data.get("login_country") or "").strip().upper()
+
+    if not cli.countrycodes.code_to_country(login_country):
+        return jsonify({"error": f"Error: Invalid country code '{login_country}'"})
 
     try:
         web.config.config_login(
-            form_data['login_email'],
+            login_email,
             form_data['login_password'],
-            form_data['login_country'],
+            login_country,
             form_data.get('login_captcha_id', ''),
             form_data.get('login_captcha_text', ''),
             app.config["config"],
         )
-        flash("Configuration imported!", "success")
         session["authenticated"] = True
+        _queue_post_reload_flash(_config_import_status_message("fetched", "AnkerMake server"), "success")
         return jsonify({"redirect": url_for('app_api_ankerctl_server_reload')})
     except web.config.ConfigImportError as err:
         if err.captcha:
             return jsonify({"captcha_id": err.captcha["id"], "captcha_url": err.captcha["img"]})
         log.exception(f"Config login failed: {err}")
-        flash("Login failed. Check server logs for details.", "danger")
-        return jsonify({"redirect": url_for('app_root')})
+        return jsonify({"error": f"Login failed: {err}"})
     except Exception as err:
         log.exception(f"Config login failed: {err}")
-        flash("An unexpected error occurred. Check server logs for details.", "danger")
-        return jsonify({"redirect": url_for('app_root')})
+        return jsonify({"error": "An unexpected error occurred while logging in. Check server logs for details."})
 
 
 @app.get("/api/ankerctl/server/reload")
@@ -1985,6 +2050,7 @@ def app_api_ankerctl_server_reload():
         app.config["login"] = bool(cfg)
         if not cfg:
             return web.util.flash_redirect(url_for('app_root'), "No printers found in config", "warning")
+        pending_flash = session.pop("post_reload_flash", None)
         if "_flashes" in session:
             session["_flashes"].clear()
 
@@ -2008,6 +2074,12 @@ def app_api_ankerctl_server_reload():
             log.exception(err)
             return web.util.flash_redirect(url_for('app_root'), f"Ankerctl could not be reloaded: {err}", "danger")
 
+        if pending_flash and pending_flash.get("message"):
+            return web.util.flash_redirect(
+                url_for('app_root'),
+                pending_flash["message"],
+                pending_flash.get("category", "success"),
+            )
         return web.util.flash_redirect(url_for('app_root'), "Ankerctl reloaded successfully", "success")
 
 
