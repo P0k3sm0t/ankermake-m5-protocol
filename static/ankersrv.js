@@ -70,6 +70,10 @@ $(function () {
         return (typeof(temp) === "number") ? Math.round(temp / 100) : null;
     }
 
+    function formatServiceTempValue(temp) {
+        return Number.isFinite(Number(temp)) ? `${Math.round(Number(temp))}°C` : "--";
+    }
+
     /**
      * Calculate the percentage between two numbers
      * @param {number} layer
@@ -538,10 +542,16 @@ $(function () {
         externalName: null,
         externalConfigured: false,
         externalRefreshSec: 3,
+        externalStreamPreview: false,
+        previewError: null,
     };
     let _cameraSettingsLoading = false;
     let _externalCameraPreviewTimer = null;
     let _externalCameraPreviewToken = 0;
+    let _externalCameraPreviewObjectUrl = null;
+    let _externalCameraPreviewEnabled = true;
+    let _externalCameraPreviewContextKey = null;
+    let _externalCameraPreviewStreamActive = false;
     let videoEnabled = false;
 
     function setFilamentState(label, detail = null, detailTone = null) {
@@ -730,7 +740,30 @@ $(function () {
         _cameraState.externalName = camera.external_name || null;
         _cameraState.externalConfigured = !!camera.external_configured;
         _cameraState.externalRefreshSec = Math.max(1, Number(camera.external_refresh_sec || 3));
+        _cameraState.externalStreamPreview = !!camera.external_stream_preview;
+        _cameraState.previewError = null;
         renderCameraUi();
+    }
+
+    function renderCameraStatusText() {
+        let detail = String(_cameraState.detail || "").trim();
+        if (_cameraState.effectiveSource === "external" && !_externalCameraPreviewEnabled) {
+            const disabledDetail = "External camera preview is disabled. Click Enable Preview to start live view.";
+            detail = detail ? `${detail} ${disabledDetail}` : disabledDetail;
+        }
+        if (_cameraState.previewError && _cameraState.effectiveSource === "external") {
+            const previewDetail = `Preview error: ${_cameraState.previewError}`;
+            detail = detail ? `${detail} ${previewDetail}` : previewDetail;
+        }
+        if (_cameraState.effectiveSource === "printer" && typeof videoEnabled !== "undefined" && !videoEnabled) {
+            detail = detail ? `${detail} Enable printer video to start live view.` : "Enable printer video to start live view.";
+        }
+
+        const status = $("#camera-source-status");
+        status
+            .text(detail || "No camera source selected.")
+            .toggleClass("text-danger", !!_cameraState.previewError && _cameraState.effectiveSource === "external")
+            .toggleClass("text-muted", !(_cameraState.previewError && _cameraState.effectiveSource === "external"));
     }
 
     function stopExternalCameraPreview(resetImage = true) {
@@ -739,20 +772,109 @@ $(function () {
             clearTimeout(_externalCameraPreviewTimer);
             _externalCameraPreviewTimer = null;
         }
+        if (_externalCameraPreviewObjectUrl) {
+            URL.revokeObjectURL(_externalCameraPreviewObjectUrl);
+            _externalCameraPreviewObjectUrl = null;
+        }
         const img = document.getElementById("external-camera-preview");
         if (img) {
             img.onload = null;
             img.onerror = null;
-            if (resetImage) {
+            if (_externalCameraPreviewStreamActive) {
+                img.src = "";
+                _externalCameraPreviewStreamActive = false;
+            } else if (resetImage) {
                 img.src = "/static/img/load-screen.svg";
             }
         }
     }
 
-    function scheduleExternalCameraPreview(delayMs) {
-        if (_cameraState.effectiveSource !== "external") {
+    function setExternalCameraPreviewEnabled(enabled) {
+        _externalCameraPreviewEnabled = !!enabled;
+        if (!_externalCameraPreviewEnabled) {
+            _cameraState.previewError = null;
+        }
+        renderCameraUi();
+    }
+
+    function ensureExternalCameraControls() {
+        const printerControls = $("#printer-camera-controls");
+        let controls = $("#external-camera-controls");
+
+        if (!controls.length && printerControls.length) {
+            controls = $(`
+                <div id="external-camera-controls" class="d-none">
+                    <div class="form-text mb-2">
+                        External preview refreshes as still frames. You can pause preview without changing the
+                        selected source. Manual snapshots use the selected source; timelapse uses its own source from Setup -&gt; Timelapse.
+                    </div>
+                    <div class="row g-2"></div>
+                </div>
+            `);
+            controls.insertAfter(printerControls);
+        }
+
+        if (!controls.length) {
+            return $();
+        }
+
+        let row = controls.find(".row.g-2").first();
+        if (!row.length) {
+            row = $('<div class="row g-2"></div>');
+            controls.append(row);
+        }
+
+        if (!controls.find("#external-preview-toggle").length) {
+            const toggleCol = $(`
+                <div class="col-6">
+                    <button class="w-100 btn btn-secondary camera-control-btn external-preview-toggle" id="external-preview-toggle" aria-pressed="true">
+                        <i class="bi bi-camera-video-off"></i> Disable Preview
+                    </button>
+                </div>
+            `);
+            const snapshotCol = row.find("#snapshot-btn-secondary").closest(".col-6");
+            if (snapshotCol.length) {
+                toggleCol.insertBefore(snapshotCol);
+            } else {
+                row.append(toggleCol);
+            }
+        }
+
+        if (!controls.find("#snapshot-btn-secondary").length) {
+            row.append(`
+                <div class="col-6">
+                    <button class="w-100 btn btn-secondary camera-control-btn" id="snapshot-btn-secondary" title="Download Snapshot">
+                        <i class="bi bi-camera"></i> Snapshot
+                    </button>
+                </div>
+            `);
+        }
+
+        return controls;
+    }
+
+    function renderExternalCameraPreviewToggle() {
+        ensureExternalCameraControls();
+        const buttons = $(".external-preview-toggle");
+        if (!buttons.length) {
             return;
         }
+        if (_externalCameraPreviewEnabled) {
+            buttons
+                .html('<i class="bi bi-camera-video-off"></i> Disable Preview')
+                .attr("aria-pressed", "true");
+        } else {
+            buttons
+                .html('<i class="bi bi-camera-video"></i> Enable Preview')
+                .attr("aria-pressed", "false");
+        }
+    }
+
+    function scheduleExternalCameraPreview(delayMs) {
+        if (_cameraState.effectiveSource !== "external" || !_externalCameraPreviewEnabled) {
+            return;
+        }
+        _externalCameraPreviewStreamActive = false;
         if (_externalCameraPreviewTimer) {
             clearTimeout(_externalCameraPreviewTimer);
         }
@@ -763,20 +885,86 @@ $(function () {
             }
             const token = _externalCameraPreviewToken;
             const refreshMs = Math.max(1000, Math.round(_cameraState.externalRefreshSec * 1000));
-            img.onload = function () {
-                if (token !== _externalCameraPreviewToken) {
-                    return;
-                }
-                scheduleExternalCameraPreview(refreshMs);
+            const startedAt = Date.now();
+            const scheduleNext = function () {
+                const elapsedMs = Date.now() - startedAt;
+                scheduleExternalCameraPreview(Math.max(0, refreshMs - elapsedMs));
             };
-            img.onerror = function () {
-                if (token !== _externalCameraPreviewToken) {
-                    return;
-                }
-                scheduleExternalCameraPreview(refreshMs);
-            };
-            img.src = `/api/camera/frame?printer_index=${encodeURIComponent(getActivePrinterIndex())}&ts=${Date.now()}`;
+            fetch(`/api/camera/frame?printer_index=${encodeURIComponent(getActivePrinterIndex())}&ts=${Date.now()}`, {
+                cache: "no-store",
+            })
+                .then(async (resp) => {
+                    if (!resp.ok) {
+                        const data = await resp.json().catch(() => ({}));
+                        throw new Error(data.error || `External camera preview failed (HTTP ${resp.status})`);
+                    }
+                    return resp.blob();
+                })
+                .then((blob) => {
+                    if (token !== _externalCameraPreviewToken) {
+                        return;
+                    }
+                    const nextUrl = URL.createObjectURL(blob);
+                    img.onload = function () {
+                        if (token !== _externalCameraPreviewToken) {
+                            URL.revokeObjectURL(nextUrl);
+                            return;
+                        }
+                        if (_externalCameraPreviewObjectUrl) {
+                            URL.revokeObjectURL(_externalCameraPreviewObjectUrl);
+                        }
+                        _externalCameraPreviewObjectUrl = nextUrl;
+                        _cameraState.previewError = null;
+                        renderCameraStatusText();
+                        scheduleNext();
+                    };
+                    img.onerror = function () {
+                        URL.revokeObjectURL(nextUrl);
+                        if (token !== _externalCameraPreviewToken) {
+                            return;
+                        }
+                        _cameraState.previewError = "The external camera returned a frame that could not be displayed.";
+                        renderCameraStatusText();
+                        scheduleNext();
+                    };
+                    img.src = nextUrl;
+                })
+                .catch((err) => {
+                    if (token !== _externalCameraPreviewToken) {
+                        return;
+                    }
+                    _cameraState.previewError = err && err.message ? err.message : String(err);
+                    renderCameraStatusText();
+                    scheduleNext();
+                });
         }, Math.max(0, delayMs || 0));
+    }
+
+    function startExternalCameraStreamPreview() {
+        const img = document.getElementById("external-camera-preview");
+        if (!img || _cameraState.effectiveSource !== "external" || !_externalCameraPreviewEnabled) {
+            return;
+        }
+        const token = _externalCameraPreviewToken;
+        const streamUrl = `/api/camera/stream?printer_index=${encodeURIComponent(getActivePrinterIndex())}&ts=${Date.now()}`;
+        _externalCameraPreviewStreamActive = true;
+        img.onload = function () {
+            if (token !== _externalCameraPreviewToken) {
+                return;
+            }
+            _cameraState.previewError = null;
+            renderCameraStatusText();
+        };
+        img.onerror = function () {
+            if (token !== _externalCameraPreviewToken) {
+                return;
+            }
+            _externalCameraPreviewStreamActive = false;
+            _cameraState.previewError = "External camera stream ended; falling back to still-frame preview.";
+            renderCameraStatusText();
+            scheduleExternalCameraPreview(1000);
+        };
+        img.src = streamUrl;
     }
 
     function renderCameraUi() {
@@ -787,31 +975,46 @@ $(function () {
             select.val(_cameraState.source || "printer");
         }
 
-        let detail = String(_cameraState.detail || "").trim();
-        if (_cameraState.effectiveSource === "printer" && typeof videoEnabled !== "undefined" && !videoEnabled) {
-            detail = detail ? `${detail} Enable printer video to start live view.` : "Enable printer video to start live view.";
-        }
-        $("#camera-source-status").text(detail || "No camera source selected.");
+        renderExternalCameraPreviewToggle();
+        renderCameraStatusText();
 
         const printerMode = _cameraState.effectiveSource === "printer";
         const externalMode = _cameraState.effectiveSource === "external";
+        const externalPreviewKey = externalMode
+            ? `${getActivePrinterIndex()}:${_cameraState.externalName || ""}:${_cameraState.externalRefreshSec}:${_cameraState.externalStreamPreview ? "stream" : "frames"}`
+            : null;
 
         if (!printerMode) {
             $("#vplayer").hide();
         }
-        $("#video-toggle-container").toggle(printerMode);
         $("#external-camera-container").toggle(externalMode);
+        const externalPreviewVisible = externalMode && _externalCameraPreviewEnabled;
+        $("#external-camera-preview")
+            .toggleClass("d-block", externalPreviewVisible)
+            .toggleClass("d-none", !externalPreviewVisible);
         $("#camera-unavailable").toggle(!printerMode && !externalMode);
 
-        $("#printer-camera-controls").toggle(printerMode);
+        $("#printer-camera-controls").toggle(printerMode || externalMode);
+        $("#light-on-col, #light-off-col")
+            .toggle(printerMode || externalMode)
+            .toggleClass("col-6", printerMode || externalMode);
+        $("#printer-video-toggle-col, #printer-snapshot-col").toggle(printerMode);
         $("#printer-camera-quality-wrap").toggle(printerMode);
-        $("#external-camera-controls").toggleClass("d-none", !externalMode);
+        ensureExternalCameraControls().toggleClass("d-none", !externalMode);
 
-        if (externalMode) {
-            stopExternalCameraPreview(false);
-            scheduleExternalCameraPreview(0);
+        if (externalMode && _externalCameraPreviewEnabled) {
+            if (_externalCameraPreviewContextKey !== externalPreviewKey) {
+                stopExternalCameraPreview(false);
+                _externalCameraPreviewContextKey = externalPreviewKey;
+                if (_cameraState.externalStreamPreview) {
+                    startExternalCameraStreamPreview();
+                } else {
+                    scheduleExternalCameraPreview(0);
+                }
+            }
         } else {
-            stopExternalCameraPreview();
+            stopExternalCameraPreview(!externalMode);
+            _externalCameraPreviewContextKey = null;
         }
     }
 
@@ -838,6 +1041,15 @@ $(function () {
         _timelapseRuntime.promptFilename = timelapse.prompt_filename || null;
         _timelapseRuntime.resumeAvailable = !!timelapse.resume_available;
         _timelapseRuntime.resumeFrameCount = Number(timelapse.resume_frame_count || 0);
+        if (Object.prototype.hasOwnProperty.call(data, "temperature")) {
+            const temperature = data.temperature || {};
+            updateFilamentServiceTemps({
+                nozzleCurrent: temperature.nozzle,
+                nozzleTarget: temperature.nozzle_target,
+                bedCurrent: temperature.bed,
+                bedTarget: temperature.bed_target,
+            });
+        }
         applyCameraRuntimeState(data.camera || {});
 
         if (data.print && data.print.state !== undefined) {
@@ -1068,6 +1280,12 @@ $(function () {
         }
 
         connect() {
+            if (this.reconnect !== false && !this.autoReconnect) {
+                return;
+            }
+            if (this.ws) {
+                return;
+            }
             var ws = this.ws = new WebSocket(this.url);
             if (this.binary)
                 ws.binaryType = "arraybuffer";
@@ -1301,6 +1519,14 @@ $(function () {
                     if (!$("#set-nozzle-temp").is(":focus")) {
                         $("#set-nozzle-temp").val(target);
                     }
+                    updateFilamentServiceTemps({
+                        nozzleCurrent: current,
+                        nozzleTarget: target,
+                    });
+                } else {
+                    updateFilamentServiceTemps({
+                        nozzleCurrent: current,
+                    });
                 }
                 pushTempData("nozzle", getTemp(data.currentTemp), getTemp(data.targetTemp));
             } else if (data.commandType == 1004) {
@@ -1312,6 +1538,14 @@ $(function () {
                     if (!$("#set-bed-temp").is(":focus")) {
                         $("#set-bed-temp").val(target);
                     }
+                    updateFilamentServiceTemps({
+                        bedCurrent: current,
+                        bedTarget: target,
+                    });
+                } else {
+                    updateFilamentServiceTemps({
+                        bedCurrent: current,
+                    });
                 }
                 pushTempData("bed", getTemp(data.currentTemp), getTemp(data.targetTemp));
             } else if (data.commandType == 1006) {
@@ -1393,6 +1627,12 @@ $(function () {
             $("#set-nozzle-temp").val(0);
             $("#bed-temp").text("0°C");
             $("#set-bed-temp").val(0);
+            updateFilamentServiceTemps({
+                nozzleCurrent: null,
+                nozzleTarget: null,
+                bedCurrent: null,
+                bedTarget: null,
+            });
             $("#print-speed").text("0mm/s");
             $("#print-layer").text("0 / 0");
             _filamentStatus.label = "Unknown";
@@ -1714,6 +1954,10 @@ $(function () {
 
     $("#video-toggle").on("click", function () {
         setPrinterVideoEnabled(!videoEnabled);
+    });
+
+    $(document).on("click", ".external-preview-toggle, #external-preview-toggle", function () {
+        setExternalCameraPreviewEnabled(!_externalCameraPreviewEnabled);
     });
 
     /**
@@ -2924,7 +3168,7 @@ $(function () {
     /**
      * Snapshot Button
      */
-    $("#snapshot-btn, #snapshot-btn-secondary").on("click", async function () {
+    $(document).on("click", "#snapshot-btn, #snapshot-btn-secondary", async function () {
         const btn = $(this);
         btn.prop("disabled", true);
         try {
@@ -2968,7 +3212,7 @@ $(function () {
         }
         _cameraSettingsLoading = true;
         try {
-            const resp = await fetch("/api/settings/camera");
+            const resp = await fetch(withActivePrinterQuery("/api/settings/camera"));
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok) {
                 throw new Error(data.error || `HTTP ${resp.status}`);
@@ -2983,7 +3227,7 @@ $(function () {
     }
 
     async function saveCameraSettings(payload, successMessage = null) {
-        const resp = await fetch("/api/settings/camera", {
+        const resp = await fetch(withActivePrinterQuery("/api/settings/camera"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ camera: payload }),
@@ -4481,6 +4725,7 @@ $(function () {
             interval: $("#timelapse-interval"),
             maxVideos: $("#timelapse-max-videos"),
             persistent: $("#timelapse-persistent"),
+            cameraSource: $("#timelapse-camera-source"),
             light: $("#timelapse-light"),
         };
         const tlSaveBtn = $("#timelapse-save");
@@ -4495,6 +4740,7 @@ $(function () {
                     tlFields.interval.val(cfg.interval || 30);
                     tlFields.maxVideos.val(cfg.max_videos || 10);
                     tlFields.persistent.prop("checked", cfg.save_persistent !== false);
+                    tlFields.cameraSource.val(cfg.camera_source || "follow");
                     tlFields.light.val(cfg.light || "");
                 }
             } catch (err) {
@@ -4511,6 +4757,7 @@ $(function () {
                     interval: parseInt(tlFields.interval.val(), 10) || 30,
                     max_videos: parseInt(tlFields.maxVideos.val(), 10) || 10,
                     save_persistent: tlFields.persistent.is(":checked"),
+                    camera_source: tlFields.cameraSource.val() || "follow",
                     light: tlFields.light.val() || null
                 }
             };
@@ -5360,6 +5607,12 @@ $(function () {
     let _filamentAllProfiles = [];
     let _filamentSwapToken = null;
     let _filamentSwapPollHandle = null;
+    let _filamentServiceTemps = {
+        nozzleCurrent: null,
+        nozzleTarget: null,
+        bedCurrent: null,
+        bedTarget: null,
+    };
     let _filamentSwapSettings = {
         allow_legacy_swap: false,
         manual_swap_preheat_temp_c: 140,
@@ -5372,6 +5625,33 @@ $(function () {
         const id = parseInt(profileId, 10);
         if (!Number.isFinite(id)) return null;
         return _filamentAllProfiles.find(p => parseInt(p.id, 10) === id) || null;
+    }
+
+    function renderFilamentServiceTemps() {
+        const nozzleCurrentEl = document.getElementById("filament-service-nozzle-current");
+        const nozzleTargetEl = document.getElementById("filament-service-nozzle-target");
+        const bedCurrentEl = document.getElementById("filament-service-bed-current");
+        const bedTargetEl = document.getElementById("filament-service-bed-target");
+        if (!nozzleCurrentEl || !nozzleTargetEl || !bedCurrentEl || !bedTargetEl) {
+            return;
+        }
+        nozzleCurrentEl.textContent = formatServiceTempValue(_filamentServiceTemps.nozzleCurrent);
+        nozzleTargetEl.textContent = `Target: ${formatServiceTempValue(_filamentServiceTemps.nozzleTarget)}`;
+        bedCurrentEl.textContent = formatServiceTempValue(_filamentServiceTemps.bedCurrent);
+        bedTargetEl.textContent = `Target: ${formatServiceTempValue(_filamentServiceTemps.bedTarget)}`;
+    }
+
+    function updateFilamentServiceTemps(partial = {}) {
+        if (!partial || typeof partial !== "object") {
+            return;
+        }
+        const keys = ["nozzleCurrent", "nozzleTarget", "bedCurrent", "bedTarget"];
+        keys.forEach((key) => {
+            if (Object.prototype.hasOwnProperty.call(partial, key)) {
+                _filamentServiceTemps[key] = partial[key];
+            }
+        });
+        renderFilamentServiceTemps();
     }
 
     function filamentServiceTemp(profile) {

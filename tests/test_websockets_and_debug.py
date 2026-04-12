@@ -201,6 +201,76 @@ def test_video_websocket_toggles_streaming_and_ctrl_dispatches_commands():
     assert quality_calls == [2]
 
 
+def test_ctrl_light_prefers_videoqueue_light_path_when_available():
+    light_calls = []
+    videoqueue_calls = []
+
+    videoqueue = SimpleNamespace(
+        saved_video_profile_id="hd",
+        api_light_state=lambda enabled: videoqueue_calls.append(enabled),
+    )
+    pppp = SimpleNamespace(
+        name="pppp",
+        connected=True,
+        api_command=lambda command_type, **kwargs: light_calls.append((command_type, kwargs)),
+    )
+    services = FakeServices(
+        svcs={
+            "videoqueue": videoqueue,
+            "pppp": pppp,
+        },
+        refs={
+            "videoqueue": 0,
+            "pppp": 0,
+        },
+    )
+    old_values, old_svc = _install_app_state(web_module, svc=services)
+
+    try:
+        ctrl_sock = FakeSock(receives=[
+            json.dumps({"light": True}),
+            None,
+        ])
+        _ws_handler(web_module, "ctrl")(ctrl_sock)
+    finally:
+        _restore_app_state(web_module, old_values, old_svc)
+
+    assert light_calls == []
+    assert videoqueue_calls == [True]
+    assert videoqueue.saved_light_state is True
+
+
+def test_ctrl_light_uses_active_pppp_without_videoqueue():
+    light_calls = []
+    pppp = SimpleNamespace(
+        name="pppp",
+        connected=True,
+        api_command=lambda command_type, **kwargs: light_calls.append((command_type, kwargs)),
+    )
+    services = FakeServices(
+        svcs={
+            "pppp": pppp,
+        },
+        refs={
+            "pppp": 0,
+        },
+    )
+    old_values, old_svc = _install_app_state(web_module, svc=services)
+
+    try:
+        ctrl_sock = FakeSock(receives=[
+            json.dumps({"light": True}),
+            None,
+        ])
+        _ws_handler(web_module, "ctrl")(ctrl_sock)
+    finally:
+        _restore_app_state(web_module, old_values, old_svc)
+
+    assert light_calls == [
+        (web_module.P2PSubCmdType.LIGHT_STATE_SWITCH, {"data": {"open": True}})
+    ]
+
+
 def test_nonzero_printer_services_do_not_fallback_to_legacy_instances():
     viewer_events = []
     printer_two_video = SimpleNamespace(

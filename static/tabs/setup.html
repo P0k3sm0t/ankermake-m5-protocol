@@ -375,7 +375,7 @@
                                             <li>Snapshot example: <code>http://camera-ip/snapshot.jpg</code></li>
                                         </ul>
                                         <p class="mb-2">
-                                            Use the <strong>Home</strong> page to switch between the printer camera and the external feed. Snapshot and timelapse follow that same source.
+                                            Use the <strong>Home</strong> page to switch between the printer camera and the external feed. Manual snapshots follow the Home source; timelapse can be pinned in <strong>Setup -&gt; Timelapse</strong>.
                                         </p>
                                         <p class="mb-0">
                                             External preview updates as refreshed still frames rather than the low-latency PPPP stream used by the printer camera.
@@ -813,6 +813,17 @@
                                             id="timelapse-persistent" checked />
                                         <label class="form-check-label" for="timelapse-persistent">Save persistently (to
                                             disk)</label>
+                                    </div>
+                                    <div>
+                                        <label class="form-label" for="timelapse-camera-source">Timelapse camera source</label>
+                                        <select class="form-select" id="timelapse-camera-source">
+                                            <option value="follow">Follow Home camera selection</option>
+                                            <option value="printer">Printer camera</option>
+                                            <option value="external">External camera</option>
+                                        </select>
+                                        <div class="form-text">
+                                            Pin timelapse to a camera so the Home page viewer can switch feeds without changing capture.
+                                        </div>
                                     </div>
                                     <div>
                                         <label class="form-label" for="timelapse-light">Light control</label>

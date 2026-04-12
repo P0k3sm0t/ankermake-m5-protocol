@@ -63,6 +63,7 @@ class VideoQueue(Service):
         self.printer_index = 0 if printer_index is None else int(printer_index)
         self.video_enabled = False
         self.timelapse_enabled = False
+        self.light_control_enabled = False
         self.last_frame_at = None
         self._enable_generation = 0  # increments each time video is enabled
         self._viewer_count = 0
@@ -91,10 +92,22 @@ class VideoQueue(Service):
         return web.resolve_pppp_service_name(self._service_printer_index())
 
     def _video_requested(self):
-        return bool(getattr(self, "video_enabled", False) or getattr(self, "timelapse_enabled", False))
+        return bool(
+            getattr(self, "video_enabled", False)
+            or getattr(self, "timelapse_enabled", False)
+            or getattr(self, "light_control_enabled", False)
+        )
 
     def _sync_persistent_state(self):
         self.persistent = self._video_requested()
+
+    def set_light_control_enabled(self, enabled):
+        self.light_control_enabled = bool(enabled)
+        self._sync_persistent_state()
+        if self.light_control_enabled:
+            self.start()
+        else:
+            self._stop_if_unrequested()
 
     def _recovery_state_details(self, pppp=None):
         pppp = pppp if pppp is not None else getattr(self, "pppp", None)
@@ -104,6 +117,7 @@ class VideoQueue(Service):
             f"printer_index={self._service_printer_index()}, "
             f"video_enabled={bool(getattr(self, 'video_enabled', False))}, "
             f"timelapse_enabled={bool(getattr(self, 'timelapse_enabled', False))}, "
+            f"light_control_enabled={bool(getattr(self, 'light_control_enabled', False))}, "
             f"viewers={int(getattr(self, '_viewer_count', 0))}, "
             f"wanted={bool(getattr(self, 'wanted', False))}, "
             f"live_active={bool(getattr(self, '_live_active', False))}, "

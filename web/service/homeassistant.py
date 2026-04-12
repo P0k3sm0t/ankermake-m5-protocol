@@ -247,16 +247,14 @@ class HomeAssistantService:
         try:
             import web
 
-            vq = web.get_video_service(self._printer_index)
-            if vq:
-                turn_on = payload.upper() == "ON"
-                vq.api_light_state(turn_on)
+            turn_on = payload.upper() == "ON"
+            if web.set_printer_light_state(turn_on, self._printer_index):
                 with self._lock:
                     self._state["light"] = turn_on
                     self._publish_state()
                 log.info(f"HA MQTT: light {'ON' if turn_on else 'OFF'}")
             else:
-                log.warning("HA MQTT: videoqueue not available for light control")
+                log.warning("HA MQTT: light control is not available")
         except Exception as err:
             log.warning(f"HA MQTT: light command failed: {err}")
 

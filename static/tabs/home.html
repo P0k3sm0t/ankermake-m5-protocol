@@ -38,7 +38,7 @@
                             </video>
                         </div>
                         <div id="external-camera-container" style="display: none;">
-                            <img class="w-100 d-block rounded-3 bg-body-tertiary" id="external-camera-preview"
+                            <img class="w-100 rounded-3 bg-body-tertiary" id="external-camera-preview"
                                 alt="External camera preview"
                                 src="{{ url_for('static', filename='img/load-screen.svg') }}">
                         </div>
@@ -48,11 +48,6 @@
                             </p>
                             <p class="display-6 mb-2">No camera source available</p>
                             <p class="mb-0">Set up an external camera in <strong>Setup -> Camera</strong>.</p>
-                        </div>
-                        <div id="video-toggle-container" class="text-center mt-3" style="display: none;">
-                            <button class="btn btn-primary" id="video-toggle">
-                                {{ macro.bi_icon("camera-video") }} Enable Video
-                            </button>
                         </div>
                     </div>
                 </div>
@@ -228,29 +223,40 @@
                                 <div class="col-12">
                                     <div id="printer-camera-controls">
                                         <div class="row g-2">
-                                            <div class="col-4">
+                                            <div class="col-6" id="light-on-col">
                                                 <button class="w-100 btn btn-secondary camera-control-btn" id="light-on" aria-pressed="false">
                                                     {{ macro.bi_icon("lightbulb", "Light on") }}
                                                 </button>
                                             </div>
-                                            <div class="col-4">
+                                            <div class="col-6" id="light-off-col">
                                                 <button class="w-100 btn btn-secondary camera-control-btn" id="light-off" aria-pressed="false">
                                                     {{ macro.bi_icon("lightbulb-off", "Light off") }}
                                                 </button>
                                             </div>
-                                            <div class="col-4">
+                                            <div class="col-6" id="printer-video-toggle-col">
+                                                <button class="w-100 btn btn-secondary camera-control-btn" id="video-toggle">
+                                                    {{ macro.bi_icon("camera-video") }} Enable Video
+                                                </button>
+                                            </div>
+                                            <div class="col-6" id="printer-snapshot-col">
                                                 <button class="w-100 btn btn-secondary camera-control-btn" id="snapshot-btn" title="Download Snapshot">
-                                                    {{ macro.bi_icon("camera", "Snapshot") }}
+                                                    {{ macro.bi_icon("camera", "Snapshot") }} Snapshot
                                                 </button>
                                             </div>
                                         </div>
                                     </div>
                                     <div id="external-camera-controls" class="d-none">
                                         <div class="form-text mb-2">
-                                            External preview refreshes as still frames. Snapshot and timelapse use the same external source.
+                                            External preview refreshes as still frames. You can pause preview without changing the
+                                            selected source. Manual snapshots use the selected source; timelapse uses its own source from Setup -&gt; Timelapse.
                                         </div>
                                         <div class="row g-2">
-                                            <div class="col-12">
+                                            <div class="col-6">
+                                                <button class="w-100 btn btn-secondary camera-control-btn external-preview-toggle" id="external-preview-toggle" aria-pressed="true">
+                                                    {{ macro.bi_icon("camera-video-off", "Disable Preview") }}
+                                                </button>
+                                            </div>
+                                            <div class="col-6">
                                                 <button class="w-100 btn btn-secondary camera-control-btn" id="snapshot-btn-secondary" title="Download Snapshot">
                                                     {{ macro.bi_icon("camera", "Snapshot") }} Snapshot
                                                 </button>

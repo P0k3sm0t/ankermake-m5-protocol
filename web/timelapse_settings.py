@@ -36,6 +36,15 @@ def _normalize_light(value):
     return None
 
 
+def _normalize_camera_source(value):
+    source = str(value or "follow").strip().lower()
+    if source in {"home", "current", "selected", "camera"}:
+        return "follow"
+    if source in {"printer", "external", "follow"}:
+        return source
+    return "follow"
+
+
 def normalize_timelapse_settings(data):
     defaults = cli.model.default_timelapse_config()
     merged = cli.model.merge_dict_defaults(data, defaults)
@@ -52,6 +61,7 @@ def normalize_timelapse_settings(data):
         ),
         "output_dir": output_dir,
         "light": _normalize_light(merged.get("light")),
+        "camera_source": _normalize_camera_source(merged.get("camera_source")),
     }
 
 

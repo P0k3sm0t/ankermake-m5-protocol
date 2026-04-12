@@ -51,6 +51,7 @@ class _AccessLogNoiseFilter(logging.Filter):
         '"GET /api/printer/alerts',
         '"GET /api/printer/runtime-state',
         '"GET /api/camera/frame',
+        '"GET /api/camera/stream',
     )
 
     def filter(self, record):
@@ -257,6 +258,7 @@ from libflagship import ROOT_DIR
 import libflagship.httpapi
 import libflagship.logincache
 from libflagship.notifications import AppriseClient
+from libflagship.pppp import P2PSubCmdType
 
 from web.lib.service import ServiceManager, RunState, ServiceStoppedError
 
@@ -699,6 +701,29 @@ def borrow_mqtt(printer_index=None):
     raise RuntimeError("No MQTT service candidates available")
 
 
+@contextmanager
+def borrow_pppp(printer_index=None, ready=True):
+    last_error = None
+    for name in _pppp_service_candidates(printer_index):
+        pppp = None
+        try:
+            pppp = app.svc.get(name, ready=ready)
+            if pppp is None:
+                app.svc.put(name)
+                continue
+            try:
+                yield pppp
+            finally:
+                app.svc.put(name)
+            return
+        except (AssertionError, KeyError, AttributeError) as err:
+            last_error = err
+            continue
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("No pppp service candidates available")
+
+
 def stream_mqtt(printer_index=None):
     last_error = None
     for name in _mqtt_service_candidates(printer_index):
@@ -776,6 +801,115 @@ def get_pppp_service(printer_index=None):
                 return svcs.get(name)
         return None
     return getattr(app.svc, "_pppp", None)
+
+
+def _send_pppp_light_state(pppp, light):
+    pppp.api_command(P2PSubCmdType.LIGHT_STATE_SWITCH, data={"open": bool(light)})
+    log.info("%s: light %s", getattr(pppp, "name", "PPPPService"), "on" if light else "off")
+    return True
+
+
+def _await_pppp_connected(pppp, timeout=8.0):
+    deadline = time.monotonic() + max(0.1, float(timeout))
+    while time.monotonic() < deadline:
+        if getattr(pppp, "connected", False):
+            return True
+        if not getattr(pppp, "running", True):
+            return False
+        time.sleep(0.1)
+    return bool(getattr(pppp, "connected", False))
+
+
+def _call_videoqueue_light_state(vq, light):
+    result = vq.api_light_state(bool(light))
+    return True if result is None else bool(result)
+
+
+def _send_light_via_videoqueue_session(vq, light, printer_index=None, timeout=10.0):
+    if vq is None or not hasattr(vq, "api_light_state"):
+        return False
+    if not hasattr(vq, "set_light_control_enabled"):
+        return _call_videoqueue_light_state(vq, light)
+
+    previous_light_control = bool(getattr(vq, "light_control_enabled", False))
+    borrowed = None
+    last_error = None
+    try:
+        vq.set_light_control_enabled(True)
+        with borrow_videoqueue(printer_index) as borrowed:
+            deadline = time.monotonic() + max(0.5, float(timeout))
+            while time.monotonic() < deadline:
+                try:
+                    if _call_videoqueue_light_state(borrowed, light):
+                        # Give the async PPPP send a moment before releasing a
+                        # temporary light-control session.
+                        time.sleep(0.3)
+                        return True
+                except Exception as exc:
+                    last_error = exc
+                time.sleep(0.2)
+    finally:
+        target = borrowed if borrowed is not None else vq
+        try:
+            target.set_light_control_enabled(previous_light_control)
+        except Exception:
+            pass
+
+    if last_error is not None:
+        log.warning("Printer light command via VideoQueue failed: %s", last_error)
+    else:
+        log.warning("Printer light command via VideoQueue timed out")
+    return False
+
+
+def set_printer_light_state(light, printer_index=None):
+    light = bool(light)
+    vq = get_video_service(printer_index)
+    if vq is not None:
+        try:
+            vq.saved_light_state = light
+        except Exception:
+            pass
+        active_pppp = getattr(vq, "pppp", None)
+        if active_pppp is not None and getattr(active_pppp, "connected", False):
+            try:
+                if _call_videoqueue_light_state(vq, light):
+                    return True
+            except Exception as exc:
+                log.debug("VideoQueue light command failed; trying a light-control session: %s", exc)
+        if _send_light_via_videoqueue_session(vq, light, printer_index):
+            return True
+
+    pppp = get_pppp_service(printer_index)
+    if pppp is not None and getattr(pppp, "connected", False):
+        try:
+            return _send_pppp_light_state(pppp, light)
+        except Exception as exc:
+            log.warning("Failed to set printer light via active PPPP service: %s", exc)
+
+    try:
+        with borrow_pppp(printer_index, ready=False) as pppp:
+            if not _await_pppp_connected(pppp):
+                log.warning("Printer light command skipped: PPPP did not connect in time")
+                return False
+            return _send_pppp_light_state(pppp, light)
+    except (AssertionError, AttributeError, KeyError, RuntimeError):
+        # Older test doubles and very old service managers may expose only
+        # videoqueue. Keep that compatibility path for tests/legacy services.
+        if vq is not None:
+            try:
+                return _call_videoqueue_light_state(vq, light)
+            except Exception:
+                pass
+        try:
+            with borrow_videoqueue(printer_index) as vq:
+                return _call_videoqueue_light_state(vq, light)
+        except Exception as exc:
+            log.warning("Failed to set printer light via fallback VideoQueue path: %s", exc)
+            return False
+    except Exception as exc:
+        log.warning("Failed to set printer light via PPPP service: %s", exc)
+        return False
 
 
 def resolve_video_service_name(printer_index=None):
@@ -1629,8 +1763,7 @@ def ctrl(sock):
 
         if "light" in msg:
             if isinstance(msg["light"], bool):
-                with borrow_videoqueue(printer_index) as vq:
-                    vq.api_light_state(msg["light"])
+                set_printer_light_state(msg["light"], printer_index)
             else:
                 log.warning(f"Invalid 'light' value (expected bool): {msg['light']!r}")
 
@@ -2319,10 +2452,11 @@ def app_api_notifications_test():
 @app.get("/api/settings/camera")
 def app_api_settings_camera():
     config = app.config["config"]
+    printer_index = _requested_printer_index()
     with config.open() as cfg:
         if not cfg:
             return {"error": "No printers configured"}, 400
-        camera_config = _resolve_camera_settings(cfg)
+        camera_config = _resolve_camera_settings(cfg, printer_index=printer_index)
     return {"camera": camera_config}
 
 
@@ -2337,11 +2471,12 @@ def app_api_settings_camera_update():
     if not isinstance(camera_payload, dict):
         return {"error": "Invalid camera payload"}, 400
 
+    printer_index = _requested_printer_index()
     with config.modify() as cfg:
         if not cfg:
             return {"error": "No printers configured"}, 400
         try:
-            camera_config = web.camera.update_camera_settings(cfg, app.config.get("printer_index", 0), camera_payload)
+            camera_config = web.camera.update_camera_settings(cfg, printer_index, camera_payload)
         except ValueError as exc:
             return {"error": str(exc)}, 400
 
@@ -3176,8 +3311,6 @@ def app_api_camera_frame():
 
     try:
         temp_path = _capture_selected_camera_snapshot_temp(camera_settings, scale=(1280, 720))
-    except RuntimeError as exc:
-        return {"error": str(exc)}, 500
     except ValueError as exc:
         payload, status = exc.args[0]
         return payload, status
@@ -3185,6 +3318,8 @@ def app_api_camera_frame():
         return {"error": str(exc)}, 502
     except subprocess.TimeoutExpired:
         return {"error": "Camera frame timed out waiting for a response."}, 504
+    except RuntimeError as exc:
+        return {"error": str(exc)}, 500
     except OSError as exc:
         return {"error": f"Camera frame capture failed: {exc}"}, 500
 
@@ -3197,6 +3332,61 @@ def app_api_camera_frame():
         return response
 
     return send_file(temp_path, mimetype="image/jpeg", as_attachment=False)
+
+
+@app.get("/api/camera/stream")
+def app_api_camera_stream():
+    """Return a persistent MJPEG preview stream for RTSP external cameras."""
+    printer_index = _requested_printer_index()
+    camera_settings = _resolve_camera_settings(printer_index=printer_index)
+    if camera_settings.get("effective_source") != web.camera.CAMERA_SOURCE_EXTERNAL:
+        return {"error": "External camera is not the active camera source."}, 400
+
+    stream_url = web.camera.external_stream_url(camera_settings)
+    if not stream_url:
+        return {"error": "External camera has no stream URL configured."}, 400
+    if not stream_url.lower().startswith("rtsp://"):
+        return {"error": "Live preview streaming is only available for RTSP stream URLs."}, 400
+
+    ffmpeg_path = _ffmpeg_path()
+    if not ffmpeg_path:
+        return {"error": "ffmpeg not installed"}, 500
+
+    refresh_sec = ((camera_settings.get("external") or {}).get("refresh_sec") or 1)
+    try:
+        refresh_sec = max(1.0, float(refresh_sec))
+    except (TypeError, ValueError):
+        refresh_sec = 1.0
+    fps = max(1.0 / 30.0, min(5.0, 1.0 / refresh_sec))
+
+    try:
+        proc = web.camera.open_external_mjpeg_stream(
+            ffmpeg_path,
+            stream_url,
+            fps=fps,
+            scale=(1280, 720),
+        )
+    except web.camera.CameraCaptureError as exc:
+        return {"error": str(exc)}, 502
+
+    boundary = b"frame"
+
+    def generate():
+        try:
+            for frame in web.camera.iter_mjpeg_frames(proc):
+                yield (
+                    b"--" + boundary + b"\r\n"
+                    b"Content-Type: image/jpeg\r\n"
+                    b"Cache-Control: no-store\r\n"
+                    b"Content-Length: " + str(len(frame)).encode("ascii") + b"\r\n\r\n"
+                    + frame + b"\r\n"
+                )
+        finally:
+            web.camera.stop_external_mjpeg_stream(proc)
+
+    response = Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.get("/api/snapshot")
@@ -3213,8 +3403,6 @@ def app_api_snapshot():
 
     try:
         temp_path = _capture_selected_camera_snapshot_temp(camera_settings)
-    except RuntimeError as exc:
-        return {"error": str(exc)}, 500
     except ValueError as exc:
         payload, status = exc.args[0]
         return payload, status
@@ -3222,6 +3410,8 @@ def app_api_snapshot():
         return {"error": f"Snapshot failed: {exc}"}, 500
     except subprocess.TimeoutExpired:
         return {"error": "Snapshot timed out waiting for a camera frame. Wait for the camera to respond and try again."}, 504
+    except RuntimeError as exc:
+        return {"error": str(exc)}, 500
     except OSError as err:
         return {"error": f"Snapshot could not run ffmpeg: {err}"}, 500
 

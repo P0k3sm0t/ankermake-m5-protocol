@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from cli.model import Account, Config, Printer
 from web import app
+from web.camera import CameraCaptureError
 from web.service.history import PrintHistory
 
 
@@ -906,7 +907,7 @@ def test_snapshot_route_reports_expected_error_paths(monkeypatch):
     assert "Command" not in timeout.get_json()["error"]
 
 
-def test_snapshot_and_camera_frame_routes_support_external_camera(monkeypatch, tmp_path):
+def test_snapshot_and_camera_frame_routes_support_external_camera(monkeypatch):
     cfg = _base_config()
     cfg.camera = {
         "per_printer": {
@@ -954,6 +955,43 @@ def test_snapshot_and_camera_frame_routes_support_external_camera(monkeypatch, t
     assert len(captures) == 2
     assert all(call["camera_settings"]["effective_source"] == "external" for call in captures)
     assert all(call["ffmpeg_path"] == "/usr/bin/ffmpeg" for call in captures)
+
+
+def test_camera_frame_route_reports_external_capture_errors_as_bad_gateway(monkeypatch):
+    cfg = _base_config()
+    cfg.camera = {
+        "per_printer": {
+            "SN1": {
+                "source": "external",
+                "external": {
+                    "name": "Workbench Cam",
+                    "snapshot_url": "",
+                    "stream_url": "rtsp://cam.local/live",
+                    "refresh_sec": 2,
+                },
+            }
+        }
+    }
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(
+        config=cfg,
+        video_supported=False,
+        videoqueue=None,
+    )
+
+    monkeypatch.setattr("web._ffmpeg_path", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(
+        "web.camera.capture_camera_snapshot_to_file",
+        lambda *args, **kwargs: (_ for _ in ()).throw(CameraCaptureError("RTSP preview failed")),
+    )
+
+    try:
+        frame = client.get("/api/camera/frame", headers={"X-Api-Key": API_KEY})
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert frame.status_code == 502
+    assert frame.get_json()["error"] == "RTSP preview failed"
 
 
 def test_snapshot_route_saves_manual_snapshot_into_timelapse_gallery(monkeypatch):

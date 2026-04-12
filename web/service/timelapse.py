@@ -70,6 +70,7 @@ class TimelapseService:
         self._max_videos = _DEFAULT_MAX_VIDEOS
         self._save_persistent = True
         self._light_mode = None  # None | "session" | "snapshot"
+        self._camera_source = "follow"  # follow | printer | external
 
         # Track whether timelapse currently holds the printer-video session.
         self._video_enabled_by_timelapse = False
@@ -112,7 +113,12 @@ class TimelapseService:
             self._light_mode = "session"
         else:
             self._light_mode = None
-        config_message = f"Timelapse: config loaded — enabled={self._enabled}, interval={self._interval}s, light_mode={self._light_mode}"
+        self._camera_source = cfg.get("camera_source", "follow") or "follow"
+        config_message = (
+            "Timelapse: config loaded - "
+            f"enabled={self._enabled}, interval={self._interval}s, "
+            f"light_mode={self._light_mode}, camera_source={self._camera_source}"
+        )
         log.debug(config_message)
 
     @property
@@ -255,15 +261,35 @@ class TimelapseService:
                 log.warning("Timelapse: video service failed to start, snapshots may fail")
                 self._video_enabled_by_timelapse = False
 
-        if self._light_mode == "session":
-            self._light_was_on = getattr(vq, "saved_light_state", None)
-            if self._light_was_on is not True:
-                log.info("Timelapse: turning on light for capture session")
-                vq.api_light_state(True)
+        self._enable_light_for_session()
+
+    def _enable_light_for_session(self):
+        if self._light_mode != "session":
+            return
+        import web
+
+        vq = web.get_video_service(self._printer_index)
+        self._light_was_on = getattr(vq, "saved_light_state", None) if vq else None
+        if self._light_was_on is not True:
+            log.info("Timelapse: turning on light for capture session")
+            web.set_printer_light_state(True, self._printer_index)
+
+    def _prepare_capture_services(self):
+        import web
+
+        if self._capture_camera.get("effective_source") == web.camera.CAMERA_SOURCE_PRINTER:
+            self._enable_video_for_timelapse()
+        else:
+            self._enable_light_for_session()
 
     def _resolve_capture_camera(self):
+        source_override = self._camera_source if self._camera_source in {"printer", "external"} else None
         with self._config_manager.open() as cfg:
-            return web.camera.resolve_camera_settings(cfg, printer_index=self._printer_index)
+            return web.camera.resolve_camera_settings(
+                cfg,
+                printer_index=self._printer_index,
+                source_override=source_override,
+            )
 
     def _disable_video_for_timelapse(self):
         """Disable video streaming if timelapse enabled it."""
@@ -271,10 +297,10 @@ class TimelapseService:
 
         vq = web.get_video_service(self._printer_index)
 
-        if self._light_mode == "session" and vq and self._light_was_on is not True:
+        if self._light_mode == "session" and self._light_was_on is not True:
             restore = self._light_was_on if self._light_was_on is not None else False
             log.info(f"Timelapse: restoring light state to {restore}")
-            vq.api_light_state(restore)
+            web.set_printer_light_state(restore, self._printer_index)
         self._light_was_on = None
 
         if not self._video_enabled_by_timelapse:
@@ -480,8 +506,7 @@ class TimelapseService:
                 self._last_recovery_request_at = 0.0
                 self._recovery_active = False
                 self._recovery_reason = None
-                if self._capture_camera.get("effective_source") == web.camera.CAMERA_SOURCE_PRINTER:
-                    self._enable_video_for_timelapse()
+                self._prepare_capture_services()
                 if capture_thread_alive:
                     log.info(
                         f"Timelapse: capture already active for '{filename}', "
@@ -524,13 +549,11 @@ class TimelapseService:
                 self._resume_dir = None
                 self._resume_filename = None
                 self._resume_frame_count = 0
-                if self._capture_camera.get("effective_source") == web.camera.CAMERA_SOURCE_PRINTER:
-                    self._enable_video_for_timelapse()
+                self._prepare_capture_services()
             else:
                 # New capture or different file — discard any pending resume
                 self._cancel_pending_resume()
-                if self._capture_camera.get("effective_source") == web.camera.CAMERA_SOURCE_PRINTER:
-                    self._enable_video_for_timelapse()
+                self._prepare_capture_services()
                 self._current_filename = filename
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                 safe_name = "".join(c if c.isalnum() or c in "-_." else "_" for c in filename)
@@ -701,7 +724,7 @@ class TimelapseService:
         # Per-snapshot light control: turn on, wait for camera to adjust, then shoot
         vq = (
             web.get_video_service(self._printer_index)
-            if self._light_mode == "snapshot" and effective_source == web.camera.CAMERA_SOURCE_PRINTER
+            if self._light_mode == "snapshot"
             else None
         )
         snap_original_light = None
@@ -709,7 +732,7 @@ class TimelapseService:
             snap_original_light = getattr(vq, "saved_light_state", None)
             if snap_original_light is not True:
                 log.debug("Timelapse: light on for snapshot, waiting 1.5s")
-                vq.api_light_state(True)
+                web.set_printer_light_state(True, self._printer_index)
                 time.sleep(1.5)
 
         frame_path = os.path.join(self._current_dir, f"frame_{self._frame_count:05d}.jpg")
@@ -762,7 +785,7 @@ class TimelapseService:
                 time.sleep(1.0)
                 restore = snap_original_light if snap_original_light is not None else False
                 log.debug(f"Timelapse: restoring light to {restore} after snapshot")
-                vq.api_light_state(restore)
+                web.set_printer_light_state(restore, self._printer_index)
 
     def _in_progress_base(self):
         """Return (and create) the persistent in-progress frames directory."""
