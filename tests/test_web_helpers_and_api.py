@@ -709,6 +709,51 @@ def test_root_shows_ffmpeg_warning_only_for_camera_capable_devices(monkeypatch):
     assert "Camera features need `ffmpeg`" not in no_camera.get_data(as_text=True)
 
 
+def test_root_handles_config_with_no_printers(monkeypatch):
+    cfg = Config(
+        account=Account(
+            auth_token="token",
+            region="eu",
+            user_id="user-1",
+            email="user@example.com",
+        ),
+        printers=[],
+    )
+    manager = FakeConfigManager(cfg)
+    client = app.test_client()
+
+    old_values = {
+        "config": app.config.get("config"),
+        "printer_index": app.config.get("printer_index"),
+        "printer_index_locked": app.config.get("printer_index_locked"),
+        "video_supported": app.config.get("video_supported"),
+        "login": app.config.get("login"),
+        "unsupported_device": app.config.get("unsupported_device"),
+        "api_key": app.config.get("api_key"),
+    }
+
+    app.config["config"] = manager
+    app.config["printer_index"] = 0
+    app.config["printer_index_locked"] = False
+    app.config["video_supported"] = True
+    app.config["login"] = True
+    app.config["unsupported_device"] = False
+    app.config["api_key"] = None
+
+    try:
+        monkeypatch.setattr("web._ffmpeg_available", lambda: False)
+        response = client.get("/")
+    finally:
+        for key, value in old_values.items():
+            app.config[key] = value
+
+    html = response.get_data(as_text=True)
+    assert response.status_code == 200
+    assert "No printers are configured for this account" in html
+    assert 'id="setup"' in html
+    assert "Camera features need `ffmpeg`" not in html
+
+
 def test_probe_printer_storage_files_uses_one_shot_mqtt_probe(monkeypatch):
     cfg = Config(
         account=Account(

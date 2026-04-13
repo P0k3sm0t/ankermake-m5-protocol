@@ -2008,14 +2008,23 @@ def app_root():
     config = app.config["config"]
     with config.open() as cfg:
         printers_list = []
+        active_printer_index = _service_printer_index(app.config.get("printer_index", 0))
         if cfg:
             anker_config = str(web.config.config_show(cfg))
             config_existing_email = cfg.account.email if cfg.account else ""
-            printer = cfg.printers[app.config["printer_index"]]
+            printers = getattr(cfg, "printers", []) or []
+            if printers and not (0 <= active_printer_index < len(printers)):
+                active_printer_index = 0
+            printer = printers[active_printer_index] if printers else None
+            if not printers:
+                anker_config = (
+                    "No printers are configured for this account. "
+                    "Import from eufyMake Studio or log in again from Setup."
+                )
             upload_rate_mbps, upload_rate_source = cli.util.resolve_upload_rate_mbps_with_source(cfg)
             upload_rate_config = getattr(cfg, "upload_rate_mbps", None)
             country = cfg.account.country if cfg.account else ""
-            for i, p in enumerate(cfg.printers):
+            for i, p in enumerate(printers):
                 printers_list.append({
                     "index": i,
                     "name": p.name,
@@ -2032,8 +2041,8 @@ def app_root():
             upload_rate_source = None
             country = ""
 
-        active_camera = _resolve_camera_settings(cfg, printer_index=app.config.get("printer_index", 0)) if cfg else _resolve_camera_settings(None)
-        printer_video_supported = bool(app.config.get("video_supported", False))
+        active_camera = _resolve_camera_settings(cfg, printer_index=active_printer_index) if cfg else _resolve_camera_settings(None)
+        printer_video_supported = bool(app.config.get("video_supported", False) and printer is not None)
         show_camera_ffmpeg_warning = bool(
             printer_video_supported
             or (active_camera.get("external") or {}).get("configured")
@@ -2049,13 +2058,13 @@ def app_root():
             "index.html",
             request_host=request_host,
             request_port=request_port,
-            configure=app.config["login"],
+            configure=bool(app.config["login"] and printer is not None),
             login_file_path=web.platform.login_path(web.platform.current_platform()),
             anker_config=anker_config,
             config_existing_email=config_existing_email,
             country_codes=json.dumps(cli.countrycodes.country_codes),
             current_country=country,
-            video_supported=app.config.get("video_supported", False),
+            video_supported=printer_video_supported,
             printer_video_supported=printer_video_supported,
             camera_features_available=bool(active_camera.get("feature_available")),
             active_camera=active_camera,
@@ -2070,7 +2079,7 @@ def app_root():
             video_profiles=web.service.video.VIDEO_PROFILES,
             video_profile_default=web.service.video.VIDEO_PROFILE_DEFAULT_ID,
             printers=printers_list,
-            active_printer_index=app.config["printer_index"],
+            active_printer_index=active_printer_index,
             printer_index_locked=app.config.get("printer_index_locked", False),
             unsupported_device=app.config.get("unsupported_device", False),
             ankerctl_root=os.path.realpath(ROOT_DIR),
