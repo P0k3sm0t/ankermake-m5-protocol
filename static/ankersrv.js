@@ -549,7 +549,7 @@ $(function () {
     let _externalCameraPreviewTimer = null;
     let _externalCameraPreviewToken = 0;
     let _externalCameraPreviewObjectUrl = null;
-    let _externalCameraPreviewEnabled = true;
+    let _externalCameraPreviewEnabled = false;
     let _externalCameraPreviewContextKey = null;
     let _externalCameraPreviewStreamActive = false;
     let videoEnabled = false;
@@ -823,8 +823,8 @@ $(function () {
         if (!controls.find("#external-preview-toggle").length) {
             const toggleCol = $(`
                 <div class="col-6">
-                    <button class="w-100 btn btn-secondary camera-control-btn external-preview-toggle" id="external-preview-toggle" aria-pressed="true">
-                        <i class="bi bi-camera-video-off"></i> Disable Preview
+                    <button class="w-100 btn btn-secondary camera-control-btn external-preview-toggle" id="external-preview-toggle" aria-pressed="false">
+                        <i class="bi bi-camera-video"></i> Enable Preview
                     </button>
                 </div>
             `);
@@ -3300,11 +3300,14 @@ $(function () {
         const select = $(this);
         const selected = select.val() || "printer";
         const previousExternalPreviewEnabled = _externalCameraPreviewEnabled;
+        const previousPrinterVideoEnabled = videoEnabled;
         select.prop("disabled", true);
         try {
             if (selected === "external") {
                 _externalCameraPreviewEnabled = false;
                 _cameraState.previewError = null;
+            } else {
+                setPrinterVideoEnabled(false);
             }
             const successMessage = selected === "external"
                 ? (_cameraState.externalConfigured
@@ -3314,6 +3317,9 @@ $(function () {
             await saveCameraSettings({ source: selected }, successMessage);
         } catch (err) {
             _externalCameraPreviewEnabled = previousExternalPreviewEnabled;
+            if (previousPrinterVideoEnabled !== videoEnabled) {
+                setPrinterVideoEnabled(previousPrinterVideoEnabled);
+            }
             flash_message(`Failed to switch camera source: ${err.message || err}`, "danger");
             await loadCameraSettings();
         } finally {
