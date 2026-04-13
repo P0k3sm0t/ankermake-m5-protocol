@@ -1851,7 +1851,11 @@ $(function () {
             }
             if (data.status === "connected") {
                 setConnectionBadge(this.badge, "success");
-                setConnectionBadge("#badge-ctrl", "success");
+                if (data.source === "service") {
+                    setConnectionBadge("#badge-ctrl", "success");
+                } else {
+                    setConnectionBadge("#badge-ctrl", "warning");
+                }
             } else if (data.status === "disconnected") {
                 setConnectionBadge(this.badge, "warning");
                 setConnectionBadge("#badge-ctrl", "warning");

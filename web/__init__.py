@@ -1769,6 +1769,7 @@ def pppp_state(sock):
     log.info("Starting PPPP state websocket handler for printer_index=%s", printer_index)
 
     last_status = None
+    last_source = None
     last_keepalive = 0.0
     pppp_was_connected = False  # True once we see "connected"; resets on dormant
     mqtt_was_stale = False      # tracks previous stale state to detect recovery
@@ -1776,6 +1777,7 @@ def pppp_state(sock):
     # Scheduling constants
     PROBE_INTERVAL = 60.0    # back-off interval after MAX_RETRIES failures
     RETRY_INTERVAL = 15.0    # interval between retries after a failure
+    PROBE_SUCCESS_FRESH_SEC = 5.0  # only trust cached probe success briefly
     MQTT_STALE_AFTER = 30.0  # MQTT considered stale after 30s silence
     MAX_RETRIES = 2          # retries after first failure before switching to PROBE_INTERVAL
 
@@ -1795,9 +1797,11 @@ def pppp_state(sock):
             # Passive read — no ref-count increment, never starts the service.
             probe = _get_pppp_probe_state(printer_index)
             pppp = get_pppp_service(printer_index)
+            current_source = "none"
 
             if pppp is not None and bool(getattr(pppp, "connected", False)):
                 current_status = "connected"
+                current_source = "service"
                 pppp_was_connected = True
                 with app.pppp_probe_lock:
                     probe["result"] = None
@@ -1828,34 +1832,55 @@ def pppp_state(sock):
                 # Also probe when PPPP was recently connected but service stopped
                 # (e.g. last video client disconnected) so the badge refreshes.
                 pppp_went_dormant = pppp_was_connected and probe_result is None
+                probe_success_fresh = (
+                    probe_result is True
+                    and last_probe_time > 0
+                    and (now - last_probe_time) <= PROBE_SUCCESS_FRESH_SEC
+                )
+                stale_probe_success = probe_result is True and not probe_success_fresh
 
                 should_probe = (
-                    (mqtt_stale or mqtt_recovered or probe_result is False or pppp_went_dormant)
+                    (
+                        mqtt_stale
+                        or mqtt_recovered
+                        or probe_result is False
+                        or pppp_went_dormant
+                        or stale_probe_success
+                    )
                     and (now - last_probe_time) > next_interval
                 )
                 if should_probe:
                     reason = ("PPPP service stopped" if pppp_went_dormant
                               else "MQTT recovered" if mqtt_recovered
                               else "MQTT stale" if mqtt_stale
+                              else "cached probe stale" if stale_probe_success
                               else "retry after fail")
                     _maybe_start_pppp_probe(reason, printer_index=printer_index)
 
-                if probe_result is True:
+                if probe_success_fresh:
                     current_status = "connected"
+                    current_source = "probe"
                 elif probe_result is False:
                     current_status = "disconnected"
+                    current_source = "probe"
                 elif pppp is not None and getattr(pppp, "wanted", False) and pppp_was_connected:
                     # Service is still wanted but lost its PPPP connection.
                     current_status = "disconnected"
+                    current_source = "service"
                 else:
                     # Service not running or connecting for the first time → dormant.
                     current_status = "dormant"
                     if pppp is None or not getattr(pppp, "wanted", False):
                         pppp_was_connected = False
 
-            if current_status != last_status or (current_status == "connected" and now - last_keepalive >= 10.0):
-                sock.send(json.dumps({"status": current_status}))
+            if (
+                current_status != last_status
+                or current_source != last_source
+                or (current_status == "connected" and now - last_keepalive >= 10.0)
+            ):
+                sock.send(json.dumps({"status": current_status, "source": current_source}))
                 last_status = current_status
+                last_source = current_source
                 if current_status == "connected":
                     last_keepalive = now
 
