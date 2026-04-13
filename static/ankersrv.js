@@ -1189,6 +1189,12 @@ $(function () {
      * This class wraps a WebSocket, and makes it automatically reconnect if the
      * connection is lost.
      */
+    function setConnectionBadge(selector, tone) {
+        $(selector)
+            .removeClass("text-bg-success text-bg-danger text-bg-secondary text-bg-warning")
+            .addClass(`text-bg-${tone}`);
+    }
+
     class AutoWebSocket {
         constructor({
             name,
@@ -1218,13 +1224,13 @@ $(function () {
         }
 
         _open() {
-            $(this.badge).removeClass("text-bg-success text-bg-danger text-bg-secondary").addClass("text-bg-warning");
+            setConnectionBadge(this.badge, "warning");
             if (this.open)
                 this.open(this.ws);
         }
 
         _close() {
-            $(this.badge).removeClass("text-bg-warning text-bg-success text-bg-secondary").addClass("text-bg-danger");
+            setConnectionBadge(this.badge, "danger");
             console.log(`${this.name} close`);
             this.is_open = false;
             const old = this.ws;
@@ -1266,7 +1272,7 @@ $(function () {
                 }
             }
             if (!this.is_open) {
-                $(this.badge).removeClass("text-bg-danger text-bg-warning").addClass("text-bg-success");
+                setConnectionBadge(this.badge, "success");
                 this.is_open = true;
                 if (this.opened)
                     this.opened(event);
@@ -1820,6 +1826,9 @@ $(function () {
                 return;
             }
             flushCtrlMessages();
+            if (data.ankerctl) {
+                setConnectionBadge("#badge-ctrl", "warning");
+            }
             if (data.video_profile) {
                 setVideoProfileActive(data.video_profile);
             }
@@ -1841,11 +1850,14 @@ $(function () {
                 return;
             }
             if (data.status === "connected") {
-                $(this.badge).removeClass("text-bg-danger text-bg-warning text-bg-secondary").addClass("text-bg-success");
+                setConnectionBadge(this.badge, "success");
+                setConnectionBadge("#badge-ctrl", "success");
             } else if (data.status === "disconnected") {
-                $(this.badge).removeClass("text-bg-success text-bg-warning text-bg-secondary").addClass("text-bg-danger");
+                setConnectionBadge(this.badge, "warning");
+                setConnectionBadge("#badge-ctrl", "warning");
             } else if (data.status === "dormant") {
-                $(this.badge).removeClass("text-bg-success text-bg-danger text-bg-warning").addClass("text-bg-secondary");
+                setConnectionBadge(this.badge, "secondary");
+                setConnectionBadge("#badge-ctrl", "warning");
             }
         },
     });
