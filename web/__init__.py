@@ -2257,8 +2257,9 @@ def app_api_ankerctl_config_login():
     except web.config.ConfigImportError as err:
         if err.captcha:
             return jsonify({"captcha_id": err.captcha["id"], "captcha_url": err.captcha["img"]})
-        log.exception(f"Config login failed: {err}")
-        return jsonify({"error": f"Login failed: {err}"})
+        err_message = str(err)
+        log.exception(f"Config login failed: {err_message}")
+        return jsonify({"error": f"Login failed: {err_message}"})
     except Exception as err:
         log.exception(f"Config login failed: {err}")
         return jsonify({"error": "An unexpected error occurred while logging in. Check server logs for details."})

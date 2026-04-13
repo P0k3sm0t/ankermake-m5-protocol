@@ -21,7 +21,7 @@ def _sanitize_text(value):
     so numeric fields are unaffected.
     """
     if isinstance(value, str):
-        return re.sub(r'<[^>]+>', '', value)
+        return re.sub(r'<[^>]{0,1000}>', '', value)
     return value
 
 
