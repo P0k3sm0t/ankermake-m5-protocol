@@ -3299,8 +3299,13 @@ $(function () {
     $("#camera-source-select").on("change", async function () {
         const select = $(this);
         const selected = select.val() || "printer";
+        const previousExternalPreviewEnabled = _externalCameraPreviewEnabled;
         select.prop("disabled", true);
         try {
+            if (selected === "external") {
+                _externalCameraPreviewEnabled = false;
+                _cameraState.previewError = null;
+            }
             const successMessage = selected === "external"
                 ? (_cameraState.externalConfigured
                     ? "Camera source switched to external camera."
@@ -3308,6 +3313,7 @@ $(function () {
                 : "Camera source switched to printer camera.";
             await saveCameraSettings({ source: selected }, successMessage);
         } catch (err) {
+            _externalCameraPreviewEnabled = previousExternalPreviewEnabled;
             flash_message(`Failed to switch camera source: ${err.message || err}`, "danger");
             await loadCameraSettings();
         } finally {
