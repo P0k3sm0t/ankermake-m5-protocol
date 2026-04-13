@@ -11,10 +11,23 @@ CAMERA_SOURCE_EXTERNAL = "external"
 DEFAULT_EXTERNAL_REFRESH_SEC = 3
 PRINTERS_WITHOUT_CAMERA = {"V8110"}
 RTSP_LOW_LATENCY_INPUT_ARGS = ["-fflags", "nobuffer", "-probesize", "32768", "-analyzeduration", "0"]
+_ALLOWED_CAMERA_URL_SCHEMES = {"http", "https", "rtsp", "rtmp"}
 
 
 class CameraCaptureError(RuntimeError):
     pass
+
+
+def _validate_camera_url(url: str, field_name: str) -> None:
+    if not url:
+        return
+    from urllib.parse import urlparse
+
+    scheme = urlparse(url).scheme.lower()
+    if scheme not in _ALLOWED_CAMERA_URL_SCHEMES:
+        raise ValueError(
+            f"{field_name} uses disallowed scheme '{scheme}'. Allowed: {', '.join(sorted(_ALLOWED_CAMERA_URL_SCHEMES))}"
+        )
 
 
 def default_camera_settings():
@@ -142,6 +155,8 @@ def update_camera_settings(cfg, printer_index, payload):
             current.get("external"),
         )
     )
+    _validate_camera_url(merged_external.get("stream_url"), "stream_url")
+    _validate_camera_url(merged_external.get("snapshot_url"), "snapshot_url")
 
     root = cli.model.merge_dict_defaults(getattr(cfg, "camera", None), cli.model.default_camera_config())
     per_printer = root.get("per_printer")

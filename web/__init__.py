@@ -479,6 +479,8 @@ def _build_windows_launcher_bat(install_dir):
         raise ValueError("Install directory is required.")
     if '"' in install_dir:
         raise ValueError('Install directory cannot contain double quotes.')
+    if any(c in install_dir for c in '\r\n\x00'):
+        raise ValueError('Install directory cannot contain newline or null characters.')
 
     escaped_dir = install_dir.replace("%", "%%")
     lines = [
@@ -4622,6 +4624,8 @@ _PROTECTED_GET_PATHS = {
     "/api/notifications/settings",
     # Exposes printer serial numbers, IP addresses, and MAC addresses
     "/api/printers",
+    # Exposes printer serial number and internal camera stream/snapshot URLs
+    "/api/settings/camera",
     "/api/printer/bed-leveling",
     "/api/printer/bed-leveling/last",
     "/api/printer/settings-summary",

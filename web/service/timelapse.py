@@ -679,7 +679,7 @@ class TimelapseService:
     def _stop_capture_thread(self):
         if self._capture_thread and self._capture_thread.is_alive():
             self._stop_event.set()
-            self._capture_thread.join(timeout=5)
+            self._capture_thread.join(timeout=_SNAPSHOT_TIMEOUT + 2)
         self._capture_thread = None
 
     def _capture_loop(self):
@@ -1123,8 +1123,16 @@ class TimelapseService:
             else:
                 stderr = result.stderr.decode(errors="ignore").strip()
                 log.warning(f"Timelapse: assembly failed: {stderr}")
+                try:
+                    os.remove(output_path)
+                except OSError:
+                    pass
         except (subprocess.TimeoutExpired, OSError) as err:
             log.warning(f"Timelapse: assembly failed: {err}")
+            try:
+                os.remove(output_path)
+            except OSError:
+                pass
         return None
 
     def _cleanup_temp(self):

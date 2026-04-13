@@ -1,5 +1,6 @@
 import json
 import logging
+import threading
 import time
 
 from queue import Empty
@@ -67,6 +68,7 @@ class VideoQueue(Service):
         self.last_frame_at = None
         self._enable_generation = 0  # increments each time video is enabled
         self._viewer_count = 0
+        self._lock = threading.Lock()
         self._pppp_ref_held = False
         self._recycle_pppp_on_restart = False
         self._awaiting_pppp_recycle = False
@@ -718,19 +720,28 @@ class VideoQueue(Service):
 
 
     def viewer_connected(self):
-        self._viewer_count += 1
-        return self._viewer_count
+        with self._lock:
+            self._viewer_count += 1
+            viewer_count = self._viewer_count
+        return viewer_count
 
     def viewer_disconnected(self):
-        if self._viewer_count > 0:
-            self._viewer_count -= 1
-        if self._viewer_count == 0 and self._pending_disable:
-            log.info("%s: last viewer disconnected; clearing stale deferred disable", self.name)
-            self._pending_disable = False
-        elif self._viewer_count == 0 and not self._video_requested() and self.state == RunState.Running:
-            log.info("%s: last viewer disconnected; stopping disabled video service", self.name)
+        stop_requested = False
+        with self._lock:
+            if self._viewer_count > 0:
+                self._viewer_count -= 1
+            else:
+                self._viewer_count = 0
+            viewer_count = self._viewer_count
+            if viewer_count == 0 and self._pending_disable:
+                log.info("%s: last viewer disconnected; clearing stale deferred disable", self.name)
+                self._pending_disable = False
+            elif viewer_count == 0 and not self._video_requested() and self.state == RunState.Running:
+                log.info("%s: last viewer disconnected; stopping disabled video service", self.name)
+                stop_requested = True
+        if stop_requested:
             self.stop()
-        return self._viewer_count
+        return viewer_count
 
     def set_video_enabled(self, enabled):
         enabled = bool(enabled)
