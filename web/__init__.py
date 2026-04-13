@@ -599,18 +599,27 @@ PPPP_SERVICE_PREFIX = "pppp:"
 LEGACY_PPPP_SERVICE_NAME = "pppp"
 
 
-def mqtt_service_name(printer_index=None):
+def _service_printer_index(printer_index=None):
     if printer_index is None:
         printer_index = app.config.get("printer_index", 0)
     if printer_index is None:
-        printer_index = 0
+        return 0
+    try:
+        return int(printer_index)
+    except (TypeError, ValueError):
+        return 0
+
+
+def mqtt_service_name(printer_index=None):
+    printer_index = _service_printer_index(printer_index)
     return f"{MQTT_SERVICE_PREFIX}{printer_index}"
 
 
 def _mqtt_service_candidates(printer_index=None):
-    current = mqtt_service_name(printer_index)
+    resolved_index = _service_printer_index(printer_index)
+    current = mqtt_service_name(resolved_index)
     candidates = [current]
-    use_legacy_fallback = printer_index in (None, 0)
+    use_legacy_fallback = resolved_index == 0
 
     svcs = getattr(app.svc, "svcs", None)
     if isinstance(svcs, dict):
@@ -619,7 +628,7 @@ def _mqtt_service_candidates(printer_index=None):
             and LEGACY_MQTT_SERVICE_NAME in svcs
             and LEGACY_MQTT_SERVICE_NAME not in candidates
         ):
-            candidates.insert(0, LEGACY_MQTT_SERVICE_NAME)
+            candidates.append(LEGACY_MQTT_SERVICE_NAME)
         return candidates
 
     # Minimal test doubles often expose a single legacy mqttqueue service.
@@ -629,17 +638,15 @@ def _mqtt_service_candidates(printer_index=None):
 
 
 def video_service_name(printer_index=None):
-    if printer_index is None:
-        printer_index = app.config.get("printer_index", 0)
-    if printer_index is None:
-        printer_index = 0
+    printer_index = _service_printer_index(printer_index)
     return f"{VIDEO_SERVICE_PREFIX}{printer_index}"
 
 
 def _video_service_candidates(printer_index=None):
-    current = video_service_name(printer_index)
+    resolved_index = _service_printer_index(printer_index)
+    current = video_service_name(resolved_index)
     candidates = [current]
-    use_legacy_fallback = printer_index in (None, 0)
+    use_legacy_fallback = resolved_index == 0
 
     svcs = getattr(app.svc, "svcs", None)
     if isinstance(svcs, dict):
@@ -657,17 +664,15 @@ def _video_service_candidates(printer_index=None):
 
 
 def pppp_service_name(printer_index=None):
-    if printer_index is None:
-        printer_index = app.config.get("printer_index", 0)
-    if printer_index is None:
-        printer_index = 0
+    printer_index = _service_printer_index(printer_index)
     return f"{PPPP_SERVICE_PREFIX}{printer_index}"
 
 
 def _pppp_service_candidates(printer_index=None):
-    current = pppp_service_name(printer_index)
+    resolved_index = _service_printer_index(printer_index)
+    current = pppp_service_name(resolved_index)
     candidates = [current]
-    use_legacy_fallback = printer_index in (None, 0)
+    use_legacy_fallback = resolved_index == 0
 
     svcs = getattr(app.svc, "svcs", None)
     if isinstance(svcs, dict):
@@ -690,6 +695,8 @@ def borrow_mqtt(printer_index=None):
     for name in _mqtt_service_candidates(printer_index):
         try:
             with app.svc.borrow(name) as mqtt:
+                if mqtt is None:
+                    continue
                 yield mqtt
                 return
         except (AssertionError, KeyError, AttributeError) as err:
@@ -697,8 +704,7 @@ def borrow_mqtt(printer_index=None):
             continue
     if last_error is not None:
         raise last_error
-    # Unreachable: _mqtt_service_candidates always returns at least one candidate.
-    raise RuntimeError("No MQTT service candidates available")
+    yield None
 
 
 @contextmanager
@@ -914,24 +920,26 @@ def set_printer_light_state(light, printer_index=None):
 
 def resolve_video_service_name(printer_index=None):
     svcs = getattr(app.svc, "svcs", None)
+    resolved_index = _service_printer_index(printer_index)
     candidates = _video_service_candidates(printer_index)
     if isinstance(svcs, dict):
         for name in candidates:
             if name in svcs:
                 return name
-    if printer_index in (None, 0):
+    if resolved_index == 0:
         return LEGACY_VIDEO_SERVICE_NAME
     return candidates[0]
 
 
 def resolve_pppp_service_name(printer_index=None):
     svcs = getattr(app.svc, "svcs", None)
+    resolved_index = _service_printer_index(printer_index)
     candidates = _pppp_service_candidates(printer_index)
     if isinstance(svcs, dict):
         for name in candidates:
             if name in svcs:
                 return name
-    if printer_index in (None, 0):
+    if resolved_index == 0:
         return LEGACY_PPPP_SERVICE_NAME
     return candidates[0]
 
@@ -1106,6 +1114,7 @@ def _serialize_filament_swap_state(state):
         "swap": {
             "token": state["token"],
             "created_at": state["created_at"],
+            "printer_index": _service_printer_index(state.get("printer_index")),
             "mode": state.get("mode", "legacy"),
             "phase": state.get("phase", "await_manual_swap"),
             "message": state.get("message"),
@@ -1159,8 +1168,8 @@ def _filament_swap_start_background(target, token):
     return thread
 
 
-def _send_filament_service_gcode(gcode):
-    with borrow_mqtt() as mqtt:
+def _send_filament_service_gcode(gcode, printer_index=None):
+    with borrow_mqtt(printer_index) as mqtt:
         if not mqtt:
             raise ConnectionError("MQTT service unavailable")
         if mqtt.is_printing:
@@ -1220,7 +1229,7 @@ def _run_legacy_swap_unload(token):
             -state["unload_length_mm"],
             feedrate_mm_min=state.get("unload_feedrate_mm_min", FILAMENT_SERVICE_FEEDRATE_MM_MIN),
         )
-        with borrow_mqtt() as mqtt:
+        with borrow_mqtt(state.get("printer_index")) as mqtt:
             _assert_filament_service_ready(mqtt)
             current_temp = mqtt.nozzle_temp
             if current_temp is None or current_temp < (state["unload_temp_c"] - FILAMENT_SERVICE_HEAT_TOLERANCE_C):
@@ -1271,7 +1280,7 @@ def _run_legacy_swap_load(token):
             state["load_length_mm"],
             feedrate_mm_min=state.get("load_feedrate_mm_min", FILAMENT_SERVICE_FEEDRATE_MM_MIN),
         )
-        with borrow_mqtt() as mqtt:
+        with borrow_mqtt(state.get("printer_index")) as mqtt:
             _assert_filament_service_ready(mqtt)
             current_temp = mqtt.nozzle_temp
             if current_temp is None or current_temp < (state["load_temp_c"] - FILAMENT_SERVICE_HEAT_TOLERANCE_C):
@@ -2232,9 +2241,9 @@ def app_api_files_local():
         return {"error": "Invalid value for 'print' field"}, 400
 
     fd = request.files["file"]
-    # Snapshot the active printer index at request time so the upload targets the
-    # correct printer even if the user switches printers mid-transfer.
-    printer_index = app.config.get("printer_index", 0)
+    # Snapshot the requested printer index at request time so the upload targets
+    # the page's printer even if another tab switches the global active printer.
+    printer_index = _requested_printer_index()
     with app.config["config"].open() as cfg:
         rate_limit_mbps, rate_limit_source = cli.util.resolve_upload_rate_mbps_with_source(cfg)
 
@@ -2261,6 +2270,7 @@ def app_api_files_local():
 
 @app.get("/api/files/printer")
 def app_api_files_printer():
+    printer_index = _requested_printer_index()
     source = str(request.args.get("source", "onboard") or "onboard").strip().lower()
     if source not in {"onboard", "usb"}:
         return {"error": "Invalid storage source"}, 400
@@ -2272,7 +2282,7 @@ def app_api_files_printer():
         except ValueError:
             return {"error": "value must be an integer"}, 400
 
-    result, error = _probe_printer_storage_files(source=source, source_value=source_value)
+    result, error = _probe_printer_storage_files(source=source, source_value=source_value, printer_index=printer_index)
     if error:
         payload, status = error
         return payload, status
@@ -2285,6 +2295,7 @@ def app_api_files_printer():
             "app_api_files_printer_thumbnail",
             path=item.get("path", ""),
             source=resolved_source,
+            printer_index=printer_index,
         )
         files.append(item)
 
@@ -2299,13 +2310,14 @@ def app_api_files_printer():
 
 @app.get("/api/files/printer/thumbnail")
 def app_api_files_printer_thumbnail():
+    printer_index = _requested_printer_index()
     source = str(request.args.get("source", "") or "").strip().lower() or None
     try:
         file_path, _ = _validate_printer_storage_path(request.args.get("path"), source=source)
     except ValueError as exc:
         return {"error": str(exc)}, 400
 
-    with borrow_mqtt() as mqtt:
+    with borrow_mqtt(printer_index) as mqtt:
         if not mqtt:
             return {"error": "Service unavailable"}, 503
         preview_url = mqtt.get_cached_stored_file_preview_url(file_path)
@@ -2321,6 +2333,7 @@ def app_api_files_printer_thumbnail():
 
 @app.post("/api/files/printer/print")
 def app_api_files_printer_print():
+    printer_index = _requested_printer_index()
     payload = request.get_json(silent=True) or {}
     source = str(payload.get("source", "") or "").strip().lower() or None
     if source is not None and source not in {"onboard", "usb"}:
@@ -2331,7 +2344,7 @@ def app_api_files_printer_print():
     except ValueError as exc:
         return {"error": str(exc)}, 400
 
-    with borrow_mqtt() as mqtt:
+    with borrow_mqtt(printer_index) as mqtt:
         if mqtt.is_printing or mqtt.has_pending_print_start or mqtt.is_preparing_print:
             return {"error": "Printer is already busy with another print job"}, 409
         started = mqtt.start_stored_file(file_path)
@@ -2645,6 +2658,7 @@ _UNSAFE_GCODE_PREFIXES = {"G0", "G1", "G28", "G29", "G91", "G90"}
 
 @app.post("/api/printer/gcode")
 def app_api_printer_gcode():
+    printer_index = _requested_printer_index()
     payload = request.get_json(silent=True)
     if not payload or "gcode" not in payload:
         return {"error": "Missing gcode"}, 400
@@ -2659,7 +2673,7 @@ def app_api_printer_gcode():
 
     normalized_gcode = "\n".join(lines)
 
-    with borrow_mqtt() as mqtt:
+    with borrow_mqtt(printer_index) as mqtt:
         if mqtt.is_printing:
             unsafe = [l for l in lines if l.split()[0].upper() in _UNSAFE_GCODE_PREFIXES]
             if unsafe:
@@ -2671,12 +2685,13 @@ def app_api_printer_gcode():
 
 @app.post("/api/printer/home")
 def app_api_printer_home():
+    printer_index = _requested_printer_index()
     payload = request.get_json(silent=True) or {}
     axis = str(payload.get("axis", "all")).lower()
     if axis not in {"all", "xy", "z"}:
         return {"error": "Invalid home axis"}, 400
 
-    with borrow_mqtt() as mqtt:
+    with borrow_mqtt(printer_index) as mqtt:
         if mqtt.is_printing:
             return {"error": "Motion commands blocked while printing"}, 409
         mqtt.send_home(axis)
@@ -2686,6 +2701,7 @@ def app_api_printer_home():
 
 @app.post("/api/printer/control")
 def app_api_printer_control():
+    printer_index = _requested_printer_index()
     payload = request.get_json(silent=True)
     if not payload or "value" not in payload:
         return {"error": "Missing value"}, 400
@@ -2697,7 +2713,7 @@ def app_api_printer_control():
     if value not in {0, 2, 3, 4}:
         return {"error": "Invalid control value"}, 400
 
-    with borrow_mqtt() as mqtt:
+    with borrow_mqtt(printer_index) as mqtt:
         mqtt.send_print_control(value)
 
     return {"status": "ok"}
@@ -2705,7 +2721,8 @@ def app_api_printer_control():
 
 @app.post("/api/printer/autolevel")
 def app_api_printer_autolevel():
-    with borrow_mqtt() as mqtt:
+    printer_index = _requested_printer_index()
+    with borrow_mqtt(printer_index) as mqtt:
         if mqtt.is_printing:
             return {"error": "Auto-leveling blocked while printing"}, 409
         mqtt.send_auto_leveling()
@@ -2714,7 +2731,8 @@ def app_api_printer_autolevel():
 
 @app.get("/api/printer/z-offset")
 def app_api_printer_z_offset():
-    with borrow_mqtt() as mqtt:
+    printer_index = _requested_printer_index()
+    with borrow_mqtt(printer_index) as mqtt:
         state = mqtt.get_z_offset_state()
         if not state.get("available"):
             try:
@@ -2729,7 +2747,8 @@ def app_api_printer_z_offset():
 
 @app.post("/api/printer/z-offset/refresh")
 def app_api_printer_z_offset_refresh():
-    with borrow_mqtt() as mqtt:
+    printer_index = _requested_printer_index()
+    with borrow_mqtt(printer_index) as mqtt:
         try:
             state = mqtt.refresh_z_offset(timeout=Z_OFFSET_REFRESH_TIMEOUT_S)
         except TimeoutError as exc:
@@ -2743,13 +2762,14 @@ def app_api_printer_z_offset_refresh():
 
 @app.post("/api/printer/z-offset")
 def app_api_printer_z_offset_set():
+    printer_index = _requested_printer_index()
     payload = request.get_json(silent=True)
     try:
         target_mm = _parse_z_offset_mm(payload, "target_mm")
     except ValueError as exc:
         return {"error": str(exc)}, 400
 
-    with borrow_mqtt() as mqtt:
+    with borrow_mqtt(printer_index) as mqtt:
         try:
             return _set_printer_z_offset(mqtt, target_mm)
         except TimeoutError as exc:
@@ -2758,13 +2778,14 @@ def app_api_printer_z_offset_set():
 
 @app.post("/api/printer/z-offset/nudge")
 def app_api_printer_z_offset_nudge():
+    printer_index = _requested_printer_index()
     payload = request.get_json(silent=True)
     try:
         delta_mm = _parse_z_offset_mm(payload, "delta_mm")
     except ValueError as exc:
         return {"error": str(exc)}, 400
 
-    with borrow_mqtt() as mqtt:
+    with borrow_mqtt(printer_index) as mqtt:
         try:
             current = mqtt.refresh_z_offset(timeout=Z_OFFSET_REFRESH_TIMEOUT_S)
             target_mm = round(current["mm"] + delta_mm, 2)
@@ -2778,7 +2799,7 @@ def app_api_printer_z_offset_nudge():
             return {"error": str(exc)}, 504
 
 
-def _read_bed_leveling_grid():
+def _read_bed_leveling_grid(printer_index=None):
     """Read the bilinear bed leveling grid from the printer via M420 V.
 
     Opens a short-lived MQTT connection, sends M420 V with a 4-second
@@ -2800,7 +2821,7 @@ def _read_bed_leveling_grid():
         if not cfg:
             return None, ({"error": "No printers configured"}, 503)
 
-    printer_index = app.config.get("printer_index", 0)
+    printer_index = _service_printer_index(printer_index)
     insecure = app.config.get("insecure", False)
 
     try:
@@ -2913,7 +2934,7 @@ def _disconnect_mqtt_client(client):
         log.debug(f"MQTT client disconnect failed: {exc}")
 
 
-def _probe_printer_storage_files(source="onboard", source_value=None, timeout=5.0, collect_window=1.0):
+def _probe_printer_storage_files(source="onboard", source_value=None, timeout=5.0, collect_window=1.0, printer_index=None):
     config = app.config.get("config")
     if not config:
         return None, ({"error": "No configuration loaded"}, 503)
@@ -2927,7 +2948,7 @@ def _probe_printer_storage_files(source="onboard", source_value=None, timeout=5.
     except (TypeError, ValueError):
         return None, ({"error": "Invalid storage source"}, 400)
 
-    printer_index = app.config.get("printer_index", 0)
+    printer_index = _service_printer_index(printer_index)
     insecure = app.config.get("insecure", False)
 
     client = None
@@ -3051,7 +3072,7 @@ def _collect_printer_gcode_output(client, gcode, *, window, drain):
     }
 
 
-def _read_printer_report(name):
+def _read_printer_report(name, printer_index=None):
     import cli.mqtt as cli_mqtt
 
     if name not in _PRINTER_REPORT_COMMANDS:
@@ -3062,7 +3083,7 @@ def _read_printer_report(name):
     if not config:
         raise ConnectionError("No configuration loaded")
 
-    printer_index = app.config.get("printer_index", 0)
+    printer_index = _service_printer_index(printer_index)
     insecure = app.config.get("insecure", False)
 
     try:
@@ -3111,8 +3132,9 @@ def _build_command_group(commands, keys):
     ]
 
 
-def _read_printer_settings_summary():
-    with borrow_mqtt() as mqtt:
+def _read_printer_settings_summary(printer_index=None):
+    printer_index = _service_printer_index(printer_index)
+    with borrow_mqtt(printer_index) as mqtt:
         live_z_offset = mqtt.get_z_offset_state()
         if not live_z_offset.get("available"):
             try:
@@ -3123,7 +3145,7 @@ def _read_printer_settings_summary():
     reports = {}
     for name in ("settings", "probe_offset", "babystep"):
         try:
-            reports[name] = _read_printer_report(name)
+            reports[name] = _read_printer_report(name, printer_index=printer_index)
         except Exception as exc:
             reports[name] = {"name": name, "error": str(exc)}
 
@@ -3190,7 +3212,8 @@ def app_api_printer_bed_leveling():
     response and returns the grid with statistics. Takes up to ~15 seconds.
     Do not call this during an active print.
     """
-    data, err = _read_bed_leveling_grid()
+    printer_index = _requested_printer_index()
+    data, err = _read_bed_leveling_grid(printer_index=printer_index)
     if err is not None:
         return err
     return data
@@ -3198,8 +3221,9 @@ def app_api_printer_bed_leveling():
 
 @app.get("/api/printer/settings-summary")
 def app_api_printer_settings_summary():
+    printer_index = _requested_printer_index()
     try:
-        return _read_printer_settings_summary()
+        return _read_printer_settings_summary(printer_index=printer_index)
     except TimeoutError as exc:
         return {"error": str(exc)}, 504
     except ConnectionError as exc:
@@ -3345,25 +3369,14 @@ def app_api_camera_stream():
     stream_url = web.camera.external_stream_url(camera_settings)
     if not stream_url:
         return {"error": "External camera has no stream URL configured."}, 400
-    if not stream_url.lower().startswith("rtsp://"):
-        return {"error": "Live preview streaming is only available for RTSP stream URLs."}, 400
-
     ffmpeg_path = _ffmpeg_path()
     if not ffmpeg_path:
         return {"error": "ffmpeg not installed"}, 500
-
-    refresh_sec = ((camera_settings.get("external") or {}).get("refresh_sec") or 1)
-    try:
-        refresh_sec = max(1.0, float(refresh_sec))
-    except (TypeError, ValueError):
-        refresh_sec = 1.0
-    fps = max(1.0 / 30.0, min(5.0, 1.0 / refresh_sec))
 
     try:
         proc = web.camera.open_external_mjpeg_stream(
             ffmpeg_path,
             stream_url,
-            fps=fps,
             scale=(1280, 720),
         )
     except web.camera.CameraCaptureError as exc:
@@ -3447,12 +3460,13 @@ def app_api_snapshot():
 @app.get("/api/history")
 def app_api_history():
     """Return print history as JSON with pagination."""
+    printer_index = _requested_printer_index()
     limit = request.args.get("limit", 50, type=int)
     offset = request.args.get("offset", 0, type=int)
     # Clamp parameters to safe ranges to prevent excessive queries or errors
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
-    with borrow_mqtt() as mqtt:
+    with borrow_mqtt(printer_index) as mqtt:
         if not mqtt:
             return {"entries": [], "total": 0}
         entries = mqtt.history.get_history(limit=limit, offset=offset)
@@ -3461,7 +3475,7 @@ def app_api_history():
     for entry in entries:
         item = dict(entry)
         item["thumbnail_url"] = (
-            url_for("app_api_history_thumbnail", entry_id=item["id"])
+            url_for("app_api_history_thumbnail", entry_id=item["id"], printer_index=printer_index)
             if item.get("thumbnail_available")
             else None
         )
@@ -3472,13 +3486,15 @@ def app_api_history():
 @app.delete("/api/history")
 def app_api_history_clear():
     """Clear all print history."""
-    with borrow_mqtt() as mqtt:
+    printer_index = _requested_printer_index()
+    with borrow_mqtt(printer_index) as mqtt:
         mqtt.history.clear()
     return {"status": "ok"}
 
 
 @app.post("/api/history/delete")
 def app_api_history_delete_selected():
+    printer_index = _requested_printer_index()
     payload = request.get_json(silent=True) or {}
     raw_ids = payload.get("ids")
     if not isinstance(raw_ids, list):
@@ -3496,7 +3512,7 @@ def app_api_history_delete_selected():
     if not entry_ids:
         return {"error": "No history entries were selected"}, 400
 
-    with borrow_mqtt() as mqtt:
+    with borrow_mqtt(printer_index) as mqtt:
         if not mqtt:
             return {"error": "Service unavailable"}, 503
         entries = [mqtt.history.get_entry(entry_id) for entry_id in entry_ids]
@@ -3516,7 +3532,8 @@ def app_api_history_delete_selected():
 def app_api_history_thumbnail(entry_id):
     from flask import send_file
 
-    with borrow_mqtt() as mqtt:
+    printer_index = _requested_printer_index()
+    with borrow_mqtt(printer_index) as mqtt:
         if not mqtt:
             return {"error": "Service unavailable"}, 503
         entry = mqtt.history.get_entry(entry_id)
@@ -3544,9 +3561,9 @@ def app_api_history_thumbnail(entry_id):
 @app.post("/api/history/<int:entry_id>/reprint")
 def app_api_history_reprint(entry_id):
     user_name = request.headers.get("User-Agent", "ankerctl").split(url_for('app_root'))[0]
-    printer_index = app.config.get("printer_index", 0)
+    printer_index = _requested_printer_index()
 
-    with borrow_mqtt() as mqtt:
+    with borrow_mqtt(printer_index) as mqtt:
         if not mqtt:
             return {"error": "Service unavailable"}, 503
         if mqtt.is_printing or mqtt.has_pending_print_start or mqtt.is_preparing_print:
@@ -3638,6 +3655,7 @@ def app_api_filaments_delete(profile_id):
 @app.post("/api/filaments/<int:profile_id>/apply")
 def app_api_filaments_apply(profile_id):
     """Send M104/M140 GCode to the printer for the given filament profile."""
+    printer_index = _requested_printer_index()
     profile = app.filaments.get(profile_id)
     if profile is None:
         return {"error": "Profile not found"}, 404
@@ -3650,7 +3668,7 @@ def app_api_filaments_apply(profile_id):
         return {"error": "Invalid temperature values in filament profile"}, 422
     gcode = f"M104 S{nozzle}\nM140 S{bed}"
     try:
-        with borrow_mqtt() as mqtt:
+        with borrow_mqtt(printer_index) as mqtt:
             _assert_filament_service_ready(mqtt)
             mqtt.send_gcode(gcode)
     except RuntimeError as exc:
@@ -3677,12 +3695,13 @@ def app_api_filament_service_swap_state():
 
 @app.post("/api/filaments/service/preheat")
 def app_api_filament_service_preheat():
+    printer_index = _requested_printer_index()
     payload = request.get_json(silent=True) or {}
     try:
         profile = _filament_service_profile(payload, "profile_id")
         temp_c = _filament_service_temp(profile)
         gcode = f"M104 S{temp_c}"
-        with borrow_mqtt() as mqtt:
+        with borrow_mqtt(printer_index) as mqtt:
             _assert_filament_service_ready(mqtt)
             mqtt.send_gcode(gcode)
     except ValueError as exc:
@@ -3706,6 +3725,7 @@ def app_api_filament_service_preheat():
 
 @app.post("/api/filaments/service/move")
 def app_api_filament_service_move():
+    printer_index = _requested_printer_index()
     payload = request.get_json(silent=True) or {}
     action = str(payload.get("action", "")).strip().lower()
     if action not in {"extrude", "retract"}:
@@ -3731,7 +3751,7 @@ def app_api_filament_service_move():
             delta_mm,
             feedrate_mm_min=feedrate_mm_min,
         )
-        with borrow_mqtt() as mqtt:
+        with borrow_mqtt(printer_index) as mqtt:
             _assert_filament_service_ready(mqtt)
             current_temp = mqtt.nozzle_temp
             wait_for_heat = current_temp is None or current_temp < (temp_c - FILAMENT_SERVICE_HEAT_TOLERANCE_C)
@@ -3764,6 +3784,7 @@ def app_api_filament_service_move():
 
 @app.post("/api/filaments/service/swap/start")
 def app_api_filament_service_swap_start():
+    printer_index = _requested_printer_index()
     payload = request.get_json(silent=True) or {}
 
     config = app.config["config"]
@@ -3813,6 +3834,7 @@ def app_api_filament_service_swap_start():
     swap_state = {
         "token": token(12),
         "created_at": int(time.time()),
+        "printer_index": printer_index,
         "mode": "legacy" if allow_legacy_swap else "manual",
         "phase": "heating_unload" if allow_legacy_swap else "await_manual_swap",
         "message": None,
@@ -3846,7 +3868,7 @@ def app_api_filament_service_swap_start():
         app.filament_swap_state = swap_state
 
     try:
-        with borrow_mqtt() as mqtt:
+        with borrow_mqtt(printer_index) as mqtt:
             _assert_filament_service_ready(mqtt)
             if allow_legacy_swap:
                 _filament_swap_start_background(_run_legacy_swap_unload, swap_state["token"])
@@ -3872,6 +3894,7 @@ def app_api_filament_service_swap_start():
 
 @app.post("/api/filaments/service/swap/confirm")
 def app_api_filament_service_swap_confirm():
+    printer_index = _requested_printer_index()
     payload = request.get_json(silent=True) or {}
     with app.filament_swap_lock:
         swap_state = app.filament_swap_state
@@ -3882,6 +3905,7 @@ def app_api_filament_service_swap_confirm():
             return {"error": "Swap token mismatch"}, 409
         if swap_state.get("phase") in {"heating_unload", "unloading", "heating_load", "loading"}:
             return {"error": "Swap stage is still running; wait for it to finish first"}, 409
+        printer_index = _service_printer_index(swap_state.get("printer_index", printer_index))
 
     if swap_state.get("mode") == "manual":
         completed_swap = _filament_swap_state_clear(swap_state["token"])
@@ -3906,7 +3930,7 @@ def app_api_filament_service_swap_confirm():
         error=None,
     )
     try:
-        with borrow_mqtt() as mqtt:
+        with borrow_mqtt(printer_index) as mqtt:
             _assert_filament_service_ready(mqtt)
     except RuntimeError as exc:
         _filament_swap_state_update(swap_state["token"], phase="error", message=str(exc), error=str(exc))

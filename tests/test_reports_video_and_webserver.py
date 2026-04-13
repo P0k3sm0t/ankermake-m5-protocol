@@ -232,7 +232,7 @@ def test_read_printer_report_disconnects_client_and_summary_builds_groups(monkey
     old_values, old_svc = _install_app_state(svc=FakeBorrowServices(mqtt))
     monkeypatch.setattr(
         "web._read_printer_report",
-        lambda name: {
+        lambda name, printer_index=None: {
             "name": name,
             "label": name,
             "gcode": {"settings": "M503", "probe_offset": "M851", "babystep": "M290 R"}[name],

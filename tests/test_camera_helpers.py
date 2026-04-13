@@ -67,7 +67,6 @@ def test_open_external_mjpeg_stream_uses_persistent_rtsp_preview_command(monkeyp
     proc = open_external_mjpeg_stream(
         "ffmpeg",
         "rtsp://cam.local/stream1",
-        fps=1,
         scale=(640, 360),
     )
 
@@ -79,7 +78,26 @@ def test_open_external_mjpeg_stream_uses_persistent_rtsp_preview_command(monkeyp
     assert "-fflags" in cmd
     assert "nobuffer" in cmd
     assert "-vf" in cmd
-    assert "scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,fps=1" in cmd
+    assert "scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2" in cmd
+    assert cmd[-7:] == ["-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "5", "pipe:1"]
+
+
+def test_open_external_mjpeg_stream_supports_ffmpeg_readable_non_rtsp_stream(monkeypatch):
+    captured = {}
+
+    class FakePopen:
+        def __init__(self, cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["kwargs"] = kwargs
+            self.stdout = None
+
+    monkeypatch.setattr("subprocess.Popen", FakePopen)
+
+    open_external_mjpeg_stream("ffmpeg", "http://cam.local/mjpeg", scale=(640, 360))
+
+    cmd = captured["cmd"]
+    assert "-rtsp_transport" not in cmd
+    assert "http://cam.local/mjpeg" in cmd
     assert cmd[-7:] == ["-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "5", "pipe:1"]
 
 

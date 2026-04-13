@@ -20,7 +20,7 @@ The `ankerctl` program uses [`libflagship`](documentation/developer-docs/libflag
 - Upload G-code to the printer, start prints from compatible printer storage entries, and reprint compatible archived jobs from history.
 - View printer storage, USB storage, and print history with thumbnail previews when available.
 - Automatic print history backed by SQLite, including filename, timestamps, duration, result, thumbnails, and reprint availability.
-- Automatic timelapse capture during prints, including pause, resume, stop, partial-save-on-failure behavior, and MP4 assembly at print end. Requires `ffmpeg`.
+- Automatic timelapse capture during prints, including pause, resume, stop, partial-save-on-failure behavior, per-printer camera source selection (`follow`, printer, or external), and MP4 assembly at print end. Requires `ffmpeg`.
 - Dedicated **Snapshots** page for timelapse frames and manual snapshots, including preview, download, and delete actions.
 - Stream the built-in printer camera to your computer, with support for optional external camera feeds and a camera setup page.
 - Manual snapshot capture from the Home page, with snapshots saved into the Snapshots gallery.
@@ -48,7 +48,7 @@ Let us know what you want to see next. Pull requests are always welcome.
 
 Choose **one** installation method:
 
-- [Install from Git](documentation/install-from-git.md) — recommended
+- [Install from Git](documentation/install-from-git.md) - recommended
 - [Install from Docker](documentation/install-from-docker.md)
 
 Suggested order of operations:
@@ -382,6 +382,7 @@ ankerctl is configured through environment variables. For Docker deployments, co
 | `TIMELAPSE_SAVE_PERSISTENT` | `true` | Save assembled videos persistently |
 | `TIMELAPSE_CAPTURES_DIR` | `/captures` | Directory used for timelapse video storage |
 | `TIMELAPSE_LIGHT` | *(unset)* | Timelapse light mode: `snapshot` (per-frame) or `session` (whole capture) |
+| `TIMELAPSE_CAMERA_SOURCE` | `follow` | Timelapse camera source: `follow`, `printer`, or `external` |
 | **Home Assistant MQTT Discovery** | | |
 | `HA_MQTT_ENABLED` | `false` | Enable Home Assistant MQTT Discovery integration |
 | `HA_MQTT_HOST` | `localhost` | Home Assistant MQTT broker host |
@@ -465,13 +466,13 @@ ankerctl automatically records every print to a local SQLite database and shows 
 
 ### Configuration
 
-- `PRINT_HISTORY_RETENTION_DAYS` — entries older than this are pruned automatically
-- `PRINT_HISTORY_MAX_ENTRIES` — oldest entries are pruned when the maximum is reached
+- `PRINT_HISTORY_RETENTION_DAYS` - entries older than this are pruned automatically
+- `PRINT_HISTORY_MAX_ENTRIES` - oldest entries are pruned when the maximum is reached
 
 ### API endpoints
 
-- `GET /api/history` — list entries (supports `?limit=` and `?offset=`)
-- `DELETE /api/history` — clear all history (requires API key if configured)
+- `GET /api/history` - list entries (supports `?limit=` and `?offset=`)
+- `DELETE /api/history` - clear all history (requires API key if configured)
 
 No setup is required. History is recorded automatically.
 
@@ -495,17 +496,27 @@ ankerctl can capture a timelapse video automatically for every print.
 
 Configure `TIMELAPSE_LIGHT` globally or through the Setup page.
 
-- `snapshot` — turn the light on for each frame, then back off
-- `session` — keep the light on for the whole capture session
-- unset — do not change the light automatically
+- `snapshot` - turn the light on for each frame, then back off
+- `session` - keep the light on for the whole capture session
+- unset - do not change the light automatically
+
+### Timelapse camera source
+
+Configure `TIMELAPSE_CAMERA_SOURCE` globally or choose the source in **Setup -> Timelapse** per printer.
+
+- `follow` - use the Home page selected camera source
+- `printer` - always use the built-in printer camera
+- `external` - always use the configured external camera
+
+This lets the Home page viewer switch between camera feeds without changing an active timelapse capture source.
 
 Videos can be listed, downloaded, and deleted from the **Timelapse** tab.
 
 ### API endpoints
 
-- `GET /api/timelapses` — list available videos with metadata
-- `GET /api/timelapse/<filename>` — download a video
-- `DELETE /api/timelapse/<filename>` — delete a video
+- `GET /api/timelapses` - list available videos with metadata
+- `GET /api/timelapse/<filename>` - download a video
+- `DELETE /api/timelapse/<filename>` - delete a video
 - `GET /api/settings/timelapse`
 - `POST /api/settings/timelapse`
 
@@ -518,7 +529,7 @@ ankerctl supports:
 - timelapse frame capture
 - optional external camera feeds configured through the web UI
 
-Use the camera-related setup pages to choose and configure the feed source that best matches your environment.
+Use **Home** to choose the viewing and manual-snapshot source. Use **Setup -> Timelapse** to choose a separate timelapse source when you do not want viewing changes to affect capture.
 
 ## Home Assistant Integration
 
@@ -562,11 +573,11 @@ A **Debug** tab then appears in the web UI.
 
 ### Included tools
 
-- **State Inspector** — live JSON dump of current print state
-- **Controls** — toggle verbose MQTT payload logging
-- **Simulation** — fire synthetic events without a real printer
-- **Services** — live service health panel with restart actions
-- **Log Viewer** — browse log files from `ANKERCTL_LOG_DIR` with filtering
+- **State Inspector** - live JSON dump of current print state
+- **Controls** - toggle verbose MQTT payload logging
+- **Simulation** - fire synthetic events without a real printer
+- **Services** - live service health panel with restart actions
+- **Log Viewer** - browse log files from `ANKERCTL_LOG_DIR` with filtering
 
 When an API key is configured, all `/api/debug/*` endpoints require authentication.
 
@@ -587,7 +598,7 @@ While `G29` is running, the UI can show how many of the 49 probe points have com
 
 ### API endpoint
 
-- `GET /api/printer/bed-leveling` — returns `{grid, min, max, rows, cols}`
+- `GET /api/printer/bed-leveling` - returns `{grid, min, max, rows, cols}`
 
 Do not call this during an active print.
 

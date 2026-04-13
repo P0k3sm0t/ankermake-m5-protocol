@@ -325,15 +325,10 @@
                                     <div class="card-body">
                                         <form id="camera-form" class="vstack gap-3">
                                             <div class="row g-3">
-                                                <div class="col-md-6">
+                                                <div class="col-12">
                                                     <label class="form-label" for="camera-external-name">External camera label</label>
                                                     <input class="form-control" type="text" id="camera-external-name"
                                                         placeholder="Workbench Cam" />
-                                                </div>
-                                                <div class="col-md-6">
-                                                    <label class="form-label" for="camera-external-refresh">Preview refresh (seconds)</label>
-                                                    <input class="form-control" type="number" min="1" max="30"
-                                                        id="camera-external-refresh" value="3" />
                                                 </div>
                                             </div>
                                             <div>
@@ -341,7 +336,7 @@
                                                 <input class="form-control" type="text" id="camera-external-stream-url"
                                                     placeholder="rtsp://user:pass@camera-ip:554/stream1" />
                                                 <div class="form-text">
-                                                    Use the main stream if the camera exposes RTSP, MJPEG, or another FFmpeg-readable feed.
+                                                    Use the main stream if the camera exposes RTSP, MJPEG, or another FFmpeg-readable feed. This drives the live Home preview.
                                                 </div>
                                             </div>
                                             <div>
@@ -349,7 +344,7 @@
                                                 <input class="form-control" type="text" id="camera-external-snapshot-url"
                                                     placeholder="http://camera-ip/snapshot.jpg" />
                                                 <div class="form-text">
-                                                    Optional. If your camera provides a direct JPEG snapshot endpoint, use it here for faster previews and capture.
+                                                    Optional. If your camera provides a direct JPEG snapshot endpoint, use it here for faster still snapshots and fallback capture.
                                                 </div>
                                             </div>
                                             <div class="d-flex flex-wrap gap-2">
@@ -378,7 +373,7 @@
                                             Use the <strong>Home</strong> page to switch between the printer camera and the external feed. Manual snapshots follow the Home source; timelapse can be pinned in <strong>Setup -&gt; Timelapse</strong>.
                                         </p>
                                         <p class="mb-0">
-                                            External preview updates as refreshed still frames rather than the low-latency PPPP stream used by the printer camera.
+                                            External preview uses the stream URL for live view when configured. Snapshot URLs are optional fallback sources for still captures.
                                         </p>
                                     </div>
                                 </div>

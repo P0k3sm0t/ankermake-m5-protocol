@@ -104,7 +104,7 @@ def resolve_camera_settings(cfg, printer_index=0, source_override=None):
     elif not printer_supported and not external_configured:
         detail = "This printer does not expose a built-in camera. Configure an external feed in Setup -> Camera."
     elif effective_source == CAMERA_SOURCE_EXTERNAL:
-        detail = f"Using external camera preview (refreshes every {external['refresh_sec']}s)."
+        detail = "Using external camera live stream." if external["stream_url"] else "Using external camera snapshot preview."
     else:
         detail = "No camera source is ready yet."
 
@@ -168,7 +168,7 @@ def runtime_camera_state(camera_settings):
         "external_name": external.get("name") or None,
         "external_configured": bool(external.get("configured")),
         "external_refresh_sec": external.get("refresh_sec") or DEFAULT_EXTERNAL_REFRESH_SEC,
-        "external_stream_preview": stream_url.lower().startswith("rtsp://"),
+        "external_stream_preview": bool(stream_url),
     }
 
 
@@ -254,35 +254,29 @@ def _rtsp_snapshot_input_arg_attempts():
     ]
 
 
-def _mjpeg_filter(scale, fps=None):
+def _mjpeg_filter(scale):
     filters = []
     scale_filter = _scale_filter(scale)
     if scale_filter:
         filters.append(scale_filter)
-    if fps:
-        filters.append(f"fps={fps:g}")
     return ",".join(filters) if filters else None
 
 
-def open_external_mjpeg_stream(ffmpeg_path, input_url, *, fps=1.0, scale=None):
-    if not str(input_url or "").lower().startswith("rtsp://"):
-        raise CameraCaptureError("External camera live preview streaming is only available for RTSP stream URLs.")
+def open_external_mjpeg_stream(ffmpeg_path, input_url, *, scale=None):
+    input_url = str(input_url or "").strip()
+    if not input_url:
+        raise CameraCaptureError("External camera live preview requires a stream URL.")
 
     cmd = [
         ffmpeg_path,
         "-loglevel",
         "error",
         "-nostdin",
-        "-rtsp_transport",
-        "tcp",
-        *RTSP_LOW_LATENCY_INPUT_ARGS,
-        "-i",
-        input_url,
-        "-an",
-        "-sn",
-        "-dn",
     ]
-    vf = _mjpeg_filter(scale, fps=fps)
+    if input_url.lower().startswith("rtsp://"):
+        cmd.extend(["-rtsp_transport", "tcp", *RTSP_LOW_LATENCY_INPUT_ARGS])
+    cmd.extend(["-i", input_url, "-an", "-sn", "-dn"])
+    vf = _mjpeg_filter(scale)
     if vf:
         cmd.extend(["-vf", vf])
     cmd.extend(["-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "5", "pipe:1"])
