@@ -5,84 +5,57 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Security
- - **`GET /api/settings/mqtt` now requires auth** — previously returned the HA MQTT broker password unauthenticated; added to `_PROTECTED_GET_PATHS`
- - **`GET /api/notifications/settings` now requires auth** — previously returned Apprise server URLs and API keys unauthenticated; added to `_PROTECTED_GET_PATHS`
- - **`/ws/ctrl` WebSocket now enforces API key auth inline** — `before_request` middleware does not run for WebSocket routes, so write-capable control operations (light, video quality, video enable) were previously unauthenticated when `ANKERCTL_API_KEY` was set
- - **Timelapse endpoints now have path traversal protection** — `GET /api/timelapse/<filename>` and `DELETE /api/timelapse/<filename>` now reject filenames containing `/`, `\`, or `..`, and additionally use `os.path.realpath()` to confirm the resolved path remains inside the captures directory
- - **XSS fixes in frontend** — `statusBadge()` unknown-status fallback now uses `escapeHtml()`; country code dropdown options now use `escapeHtml()` on values; GCode log now uses `document.createTextNode()` instead of string `.append()` to prevent HTML injection
- - Timelapse video URLs now use `encodeURIComponent()` instead of `escapeHtml()` (correct encoding for URL path segments)
- - `sockets` variable in `ankersrv.js` promoted from implicit global to explicit `const`
-
-### Fixed
- - `multiprocessing.Queue` replaced with `queue.Queue` in `web/lib/service.py` — the multiprocessing variant is incompatible with the threading context used by `ServiceManager`, causing stream consumers to silently hang
- - **HomeAssistantService availability thread leak** — `_on_connect` now stops the existing heartbeat thread before spawning a new one on MQTT reconnects; previously each reconnect leaked a thread
- - **`MqttQueue.worker_stop()` now calls `self._ha.stop()`** — Home Assistant service was not shut down when the MQTT service stopped, leaving the HA broker connection and heartbeat thread running
- - `/ws/ctrl` handler now catches `ConnectionClosed`, `json.JSONDecodeError`, and `TypeError` (from `None` returned by `sock.receive()`) — previously any of these would crash the handler thread
- - Video quality `/ws/ctrl` handler now correctly accepts `str` values (`"sd"`, `"hd"`) — was checking `isinstance(..., int)` but the frontend sends strings
- - `JSON.parse()` in MQTT and PPPP WebSocket `onmessage` handlers wrapped in `try/catch` — a malformed message previously caused the handler to stop processing all subsequent messages
- - Temperature inputs: `max` attribute is now set dynamically from printer model (M5: 260°C nozzle, M5C: 300°C nozzle, both 100°C bed) via Jinja2 template; JS clamp reads the `max` attribute instead of using a hardcoded value
- - Temperature reset now uses `.val(0)` instead of `.attr("value", "0°C")` — the old form left a stale display value
- - ct=1044 MQTT handler added to frontend: populates `#print-name` with the basename of `data.filePath` when a print starts
- - Removed double `escapeHtml()` on `.textContent` assignments — `.textContent` is already safe, double-escaping caused `&amp;` to appear literally in the UI
- - `.prop("required", true)` fix for CAPTCHA input — was `.prop("required")` (reads property instead of setting it), making the field not required in the browser
- - `macro.html`: fixed `aria-controls="{{target}}"` (was hardcoded `"home"`); updated tooltip attributes to Bootstrap 5 (`data-bs-toggle`, `data-bs-placement`)
- - Video resolution label now registers a `resize` event listener so the label updates correctly when the stream resolution changes mid-session
- - Removed stale `//# sourceMappingURL=chart.umd.js.map` reference from `chart.umd.min.js` that caused a 404 console error
- - Removed test GCode files (`test_cube_50mm.gcode`, `test_cube_5mm.gcode`) from the repository
- - Updated `.gitignore`: added `.env.*`, `.claude/`, `.venv/`, `*.log`
+## [1.0.0] - 2026-04-13
 
 ### Added
+ - External camera feed support (RTSP, HTTP, MJPEG) configurable in Setup tab
+ - Snapshot gallery with timelapse integration — manual snapshots archived per print
+ - Guided automatic filament swap flow: homes, raises Z, parks, heats, unloads, prompts, loads, purges, cools
+ - Per-printer timelapse settings
+ - Timelapse pause / resume / stop controls for running captures
+ - Snapshot collection browser with individual file download and delete
+ - Local G-Code archiving with reprint support from History
+ - G-Code thumbnails in History, thumb drive, and printer storage lists
+ - Selective delete of individual History entries
+ - Filament state indicator on Home page
+ - Print-complete alerts via notification path
+ - Setup page with Windows launcher `.bat` download
+ - Slicer login cache auto-import (OrcaSlicer / EufyMake Studio / PrusaSlicer)
+ - Collapsible Home page console viewer
+ - Camera frame API endpoint for live JPEG capture (`/api/camera/frame`)
+ - Print-state lock on G-Code page (file lists do not refresh while printing)
  - Apprise notification integration with full web UI configuration
-   - Event hooks for print start/finish/fail/progress and file uploads
-   - Snapshot attachments for notifications (with fallback to preview image)
-   - Configurable progress interval and event toggles
-   - Support for environment variable overrides (`APPRISE_*`)
- - Email/password login flow as alternative to `login.json` import
-   - CAPTCHA handling via browser when required
-   - Support for different country regions
- - Native print stop command via MQTT (`ZZ_MQTT_CMD_PRINT_CONTROL`)
- - Print control visibility toggle in web UI (configurable via `PRINT_CONTROLS_VISIBLE`)
- - Test script for print control commands (`examples/test_print_control.py`)
- - Comprehensive CLAUDE.md guide for AI assistants and developers
+ - Email/password login flow as alternative to `login.json` import with CAPTCHA support
+ - Home Assistant MQTT Discovery integration
+ - Print history with SQLite backend, reprint support, and thumbnail previews
+ - Bed level map heatmap with before/after comparison in Setup tab
 
-### Fixed (prior)
- - **PPPP single-reader architecture** - Critical fix for "two readers one socket" bug that caused packet loss and unstable video/command connections
- - Thread-safety in PPPP AABB reply reader with locking to prevent `EOFError` crashes
- - UDP socket timeout leak in PPPP recv/send operations
- - Race conditions in `Service.tap()` handler removal
- - WebSocket URL fixes for `/ws/video` and `/ws/ctrl` (missing `//`)
- - Camera light control null check to prevent errors before PPPP connection established
- - Video frame forwarding from XZYH to VideoQueue
- - File transfer EOF/OSError handling (now properly reported as ConnectionError)
- - Stop button reliability with improved multi-GCode command handling
- - PPPP service worker start logic to prevent "No pppp connection" errors during uploads
+### Security
+ - SSRF closed: External camera URLs validated against an allowlist (`http`, `https`, `rtsp`, `rtmp`) before being passed to ffmpeg
+ - Auth gap closed: `GET /api/settings/camera` now requires authentication
+ - Injection fix: Newlines and null bytes rejected in Windows launcher `install_dir`
+ - XSS fix: Auto-leveling progress value escaped before DOM insertion (CodeQL #21)
+ - Stack trace exposure fix: Exception object no longer flows into login error response (CodeQL #25)
+ - ReDoS fix: HTML tag stripping regex quantifier bounded to prevent polynomial backtracking (CodeQL #24)
+ - `GET /api/settings/mqtt` and `GET /api/notifications/settings` now require auth
+ - `/ws/ctrl` WebSocket enforces API key auth inline
+ - Timelapse endpoints have path traversal protection
 
-### Performance
- - Skip expensive notification operations when events are disabled
- - Optimized progress notification emission to respect interval settings
-
-## [1.0.1] - 2024-01-15
-
- - Fixes MQTT connection errors post AnkerMake Firmware Upgrades
-
-## [1.0.0] - 2023-05-24
-
- - Version 1.0.0!
- - Add video streaming support to web ui
- - Add support for uploading `login.json` through web ui
- - Add print monitoring through web ui
- - Add new mqtt types to libflagship
- - Add status icons for mqtt, pppp and ctrl websocket
- - Add support for restarting web services through web ui
- - Add support for turning on/off camera light from web ui
- - Add support for controlling video mode (sd/hd) from web ui
- - Add `--pppp-dump` option for making a debug packet capture
- - Stabilized video streaming, by fixing some rare corner cases.
- - Make video stream automatically reconnect on connection loss
- - Make video stream automatically suspend when no clients are connected
+### Fixed
+ - Race condition: `_viewer_count` in VideoQueue protected by threading lock
+ - Resource leak: Partial MP4 deleted on ffmpeg assembly failure
+ - Thread safety: Capture thread join timeout increased to exceed ffmpeg snapshot timeout
+ - Ghost temperature flicker: MQTT parser correctly preserves `0°C` cooldown targets
+ - PPPP status correctly shows yellow when using stale fallback IP
+ - History not saving when prints start in close succession
+ - PPPP live video stalls and recovery log noise
+ - Stop button freeze and active-print cancel reliability
+ - Homing buttons now match official app MQTT payloads
+ - MQTT disconnected false-positive on second printer
+ - Timelapse delete now removes matching snapshot collection
+ - `multiprocessing.Queue` replaced with `queue.Queue` in service framework
+ - HomeAssistantService heartbeat thread leak on MQTT reconnect
+ - `/ws/ctrl` handler now catches all connection and parse errors gracefully
 
 ## [0.9.0] - 2023-04-17
 
