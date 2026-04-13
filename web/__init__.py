@@ -289,7 +289,7 @@ if not app.secret_key:
     app.secret_key = token(24)
 app.svc = ServiceManager()
 app.filament_swap_lock = threading.Lock()
-app.filament_swap_state = None
+app.filament_swap_state = {}
 app.pppp_probe_lock = threading.Lock()
 
 
@@ -1186,33 +1186,106 @@ def _serialize_filament_swap_state(state):
     }
 
 
-def _filament_swap_state_get(token=None):
+def _filament_swap_states_locked():
+    states = app.filament_swap_state
+    if states is None:
+        app.filament_swap_state = {}
+        return app.filament_swap_state
+
+    if isinstance(states, dict) and "token" in states:
+        printer_index = _service_printer_index(states.get("printer_index"))
+        states["printer_index"] = printer_index
+        app.filament_swap_state = {printer_index: states}
+        return app.filament_swap_state
+
+    if not isinstance(states, dict):
+        app.filament_swap_state = {}
+        return app.filament_swap_state
+
+    normalized = {}
+    changed = False
+    for raw_printer_index, state in list(states.items()):
+        if not isinstance(state, dict):
+            changed = True
+            continue
+        printer_index = _service_printer_index(raw_printer_index)
+        state["printer_index"] = printer_index
+        normalized[printer_index] = state
+        changed = changed or printer_index != raw_printer_index
+
+    if changed:
+        app.filament_swap_state = normalized
+        return app.filament_swap_state
+    return states
+
+
+def _filament_swap_state_by_token_locked(states, token, printer_index=None):
+    if token is None:
+        return None, None
+
+    if printer_index is not None:
+        resolved_index = _service_printer_index(printer_index)
+        state = states.get(resolved_index)
+        if state is not None and state.get("token") == token:
+            return resolved_index, state
+        return None, None
+
+    for resolved_index, state in states.items():
+        if state is not None and state.get("token") == token:
+            return resolved_index, state
+    return None, None
+
+
+def _filament_swap_state_get(token=None, printer_index=None):
     with app.filament_swap_lock:
-        state = app.filament_swap_state
+        states = _filament_swap_states_locked()
+        if token is not None:
+            _, state = _filament_swap_state_by_token_locked(states, token, printer_index=printer_index)
+            return dict(state) if state is not None else None
+
+        state = states.get(_service_printer_index(printer_index))
         if state is None:
-            return None
-        if token is not None and state.get("token") != token:
             return None
         return dict(state)
 
 
-def _filament_swap_state_update(token, **updates):
+def _filament_swap_state_set_if_absent(state):
     with app.filament_swap_lock:
-        state = app.filament_swap_state
-        if state is None or state.get("token") != token:
+        states = _filament_swap_states_locked()
+        state = dict(state)
+        printer_index = _service_printer_index(state.get("printer_index"))
+        if states.get(printer_index) is not None:
+            return None
+        state["printer_index"] = printer_index
+        states[printer_index] = state
+        return dict(state)
+
+
+def _filament_swap_state_update(token, printer_index=None, **updates):
+    with app.filament_swap_lock:
+        states = _filament_swap_states_locked()
+        _, state = _filament_swap_state_by_token_locked(states, token, printer_index=printer_index)
+        if state is None:
             return None
         state.update(updates)
         return dict(state)
 
 
-def _filament_swap_state_clear(token=None):
+def _filament_swap_state_clear(token=None, printer_index=None):
     with app.filament_swap_lock:
-        state = app.filament_swap_state
+        states = _filament_swap_states_locked()
+        if token is not None:
+            resolved_index, state = _filament_swap_state_by_token_locked(
+                states,
+                token,
+                printer_index=printer_index,
+            )
+        else:
+            resolved_index = _service_printer_index(printer_index)
+            state = states.get(resolved_index)
         if state is None:
             return None
-        if token is not None and state.get("token") != token:
-            return None
-        app.filament_swap_state = None
+        states.pop(resolved_index, None)
         return dict(state)
 
 
@@ -3776,8 +3849,8 @@ def app_api_filaments_duplicate(profile_id):
 
 @app.get("/api/filaments/service/swap")
 def app_api_filament_service_swap_state():
-    with app.filament_swap_lock:
-        return _serialize_filament_swap_state(app.filament_swap_state)
+    printer_index = _requested_printer_index()
+    return _serialize_filament_swap_state(_filament_swap_state_get(printer_index=printer_index))
 
 
 @app.post("/api/filaments/service/preheat")
@@ -3924,9 +3997,8 @@ def app_api_filament_service_swap_start():
         unload_feedrate_mm_min = FILAMENT_SERVICE_SWAP_UNLOAD_FEEDRATE_MM_MIN
         load_feedrate_mm_min = FILAMENT_SERVICE_SWAP_LOAD_FEEDRATE_MM_MIN
 
-    with app.filament_swap_lock:
-        if app.filament_swap_state is not None:
-            return {"error": "A filament swap is already in progress"}, 409
+    if _filament_swap_state_get(printer_index=printer_index) is not None:
+        return {"error": "A filament swap is already in progress"}, 409
 
     swap_state = {
         "token": token(12),
@@ -3967,8 +4039,8 @@ def app_api_filament_service_swap_start():
             "then confirm. Use Quick Extrude afterward if you need to purge."
         )
 
-    with app.filament_swap_lock:
-        app.filament_swap_state = swap_state
+    if _filament_swap_state_set_if_absent(swap_state) is None:
+        return {"error": "A filament swap is already in progress"}, 409
 
     try:
         with borrow_mqtt(printer_index) as mqtt:
@@ -3978,13 +4050,13 @@ def app_api_filament_service_swap_start():
             else:
                 mqtt.send_gcode(f"M104 S{manual_swap_preheat_temp_c}")
     except RuntimeError as exc:
-        _filament_swap_state_clear(swap_state["token"])
+        _filament_swap_state_clear(swap_state["token"], printer_index=printer_index)
         return {"error": str(exc)}, 409
     except TimeoutError as exc:
-        _filament_swap_state_clear(swap_state["token"])
+        _filament_swap_state_clear(swap_state["token"], printer_index=printer_index)
         return {"error": str(exc)}, 504
     except ConnectionError as exc:
-        _filament_swap_state_clear(swap_state["token"])
+        _filament_swap_state_clear(swap_state["token"], printer_index=printer_index)
         return {"error": str(exc)}, 503
 
     return {
@@ -3999,19 +4071,18 @@ def app_api_filament_service_swap_start():
 def app_api_filament_service_swap_confirm():
     printer_index = _requested_printer_index()
     payload = request.get_json(silent=True) or {}
-    with app.filament_swap_lock:
-        swap_state = app.filament_swap_state
-        if swap_state is None:
-            return {"error": "No filament swap is in progress"}, 409
-        provided_token = payload.get("token")
-        if provided_token and provided_token != swap_state["token"]:
-            return {"error": "Swap token mismatch"}, 409
-        if swap_state.get("phase") in {"homing", "heating_unload", "priming_unload", "unloading", "heating_load", "loading"}:
-            return {"error": "Swap stage is still running; wait for it to finish first"}, 409
-        printer_index = _service_printer_index(swap_state.get("printer_index", printer_index))
+    swap_state = _filament_swap_state_get(printer_index=printer_index)
+    if swap_state is None:
+        return {"error": "No filament swap is in progress"}, 409
+    provided_token = payload.get("token")
+    if provided_token and provided_token != swap_state["token"]:
+        return {"error": "Swap token mismatch"}, 409
+    if swap_state.get("phase") in {"homing", "heating_unload", "priming_unload", "unloading", "heating_load", "loading"}:
+        return {"error": "Swap stage is still running; wait for it to finish first"}, 409
+    printer_index = _service_printer_index(swap_state.get("printer_index", printer_index))
 
     if swap_state.get("mode") == "manual":
-        completed_swap = _filament_swap_state_clear(swap_state["token"])
+        completed_swap = _filament_swap_state_clear(swap_state["token"], printer_index=printer_index)
         return {
             "status": "ok",
             "message": (
@@ -4025,6 +4096,7 @@ def app_api_filament_service_swap_confirm():
 
     _filament_swap_state_update(
         swap_state["token"],
+        printer_index=printer_index,
         phase="heating_load",
         message=(
             f"Heating for automatic load / purge of {swap_state['load_profile_name']} "
@@ -4036,14 +4108,26 @@ def app_api_filament_service_swap_confirm():
         with borrow_mqtt(printer_index) as mqtt:
             _assert_filament_service_ready(mqtt)
     except RuntimeError as exc:
-        _filament_swap_state_update(swap_state["token"], phase="error", message=str(exc), error=str(exc))
+        _filament_swap_state_update(
+            swap_state["token"],
+            printer_index=printer_index,
+            phase="error",
+            message=str(exc),
+            error=str(exc),
+        )
         return {"error": str(exc)}, 409
     except ConnectionError as exc:
-        _filament_swap_state_update(swap_state["token"], phase="error", message=str(exc), error=str(exc))
+        _filament_swap_state_update(
+            swap_state["token"],
+            printer_index=printer_index,
+            phase="error",
+            message=str(exc),
+            error=str(exc),
+        )
         return {"error": str(exc)}, 503
 
     _filament_swap_start_background(_run_legacy_swap_load, swap_state["token"])
-    current_state = _filament_swap_state_get(swap_state["token"])
+    current_state = _filament_swap_state_get(swap_state["token"], printer_index=printer_index)
     if current_state is None:
         return {
             "status": "ok",
@@ -4060,22 +4144,22 @@ def app_api_filament_service_swap_confirm():
 
 @app.post("/api/filaments/service/swap/cancel")
 def app_api_filament_service_swap_cancel():
+    printer_index = _requested_printer_index()
     payload = request.get_json(silent=True) or {}
-    with app.filament_swap_lock:
-        swap_state = app.filament_swap_state
-        if swap_state is None:
-            return {"status": "ok", "pending": False, "swap": None}
-        provided_token = payload.get("token")
-        if provided_token and provided_token != swap_state["token"]:
-            return {"error": "Swap token mismatch"}, 409
-        if swap_state.get("phase") in {"homing", "heating_unload", "priming_unload", "unloading", "heating_load", "loading"}:
-            return {"error": "Cannot cancel while an automatic swap stage is running"}, 409
-        app.filament_swap_state = None
+    swap_state = _filament_swap_state_get(printer_index=printer_index)
+    if swap_state is None:
+        return {"status": "ok", "pending": False, "swap": None}
+    provided_token = payload.get("token")
+    if provided_token and provided_token != swap_state["token"]:
+        return {"error": "Swap token mismatch"}, 409
+    if swap_state.get("phase") in {"homing", "heating_unload", "priming_unload", "unloading", "heating_load", "loading"}:
+        return {"error": "Cannot cancel while an automatic swap stage is running"}, 409
+    cancelled_swap = _filament_swap_state_clear(swap_state["token"], printer_index=printer_index)
 
     return {
         "status": "ok",
         "message": "Filament swap cancelled.",
-        "cancelled_swap": swap_state,
+        "cancelled_swap": cancelled_swap,
         "pending": False,
         "swap": None,
     }

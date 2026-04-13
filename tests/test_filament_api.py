@@ -44,13 +44,17 @@ class FakeConfigManager:
 
 class FakeServices:
     def __init__(self, mqtt):
-        self._mqtt = mqtt
-        self.svcs = {"mqttqueue": mqtt}
+        if isinstance(mqtt, dict):
+            self._services = dict(mqtt)
+        else:
+            self._services = {"mqttqueue": mqtt, "mqttqueue:0": mqtt}
+        self.svcs = dict(self._services)
 
     @contextmanager
     def borrow(self, name):
-        assert name == "mqttqueue"
-        yield self._mqtt
+        if name not in self._services:
+            raise KeyError(name)
+        yield self._services[name]
 
 
 def _base_config():
@@ -84,7 +88,7 @@ def _install_state(tmp_path, mqtt):
     app.config["unsupported_device"] = False
     app.svc = FakeServices(mqtt)
     app.filaments = FilamentStore(tmp_path / "filaments.db")
-    app.filament_swap_state = None
+    app.filament_swap_state = {}
 
     return old_values, old_svc, old_filaments, old_swap
 
@@ -269,6 +273,88 @@ def test_filament_swap_routes_follow_manual_guided_flow_by_default(tmp_path):
     assert cancelled.status_code == 200
     assert cancelled.get_json()["pending"] is False
     assert sent == ["M104 S140"]
+
+
+def test_filament_swap_state_is_scoped_per_printer(tmp_path):
+    sent0 = []
+    sent1 = []
+    mqtt0 = SimpleNamespace(
+        is_printing=False,
+        nozzle_temp=150,
+        send_gcode=lambda gcode: sent0.append(gcode),
+    )
+    mqtt1 = SimpleNamespace(
+        is_printing=False,
+        nozzle_temp=150,
+        send_gcode=lambda gcode: sent1.append(gcode),
+    )
+    client = app.test_client()
+    old_values, old_svc, old_filaments, old_swap = _install_state(
+        tmp_path,
+        {"mqttqueue:0": mqtt0, "mqttqueue:1": mqtt1},
+    )
+    app.config["config"].cfg.printers.append(_printer("SN2", "Printer 2"))
+
+    try:
+        started0 = client.post(
+            "/api/filaments/service/swap/start?printer_index=0",
+            headers={"X-Api-Key": API_KEY},
+        )
+        started1 = client.post(
+            "/api/filaments/service/swap/start?printer_index=1",
+            headers={"X-Api-Key": API_KEY},
+        )
+        token0 = (started0.get_json().get("swap") or {}).get("token")
+        token1 = (started1.get_json().get("swap") or {}).get("token")
+        state0 = client.get(
+            "/api/filaments/service/swap?printer_index=0",
+            headers={"X-Api-Key": API_KEY},
+        )
+        state1 = client.get(
+            "/api/filaments/service/swap?printer_index=1",
+            headers={"X-Api-Key": API_KEY},
+        )
+        mismatch = client.post(
+            "/api/filaments/service/swap/confirm?printer_index=1",
+            json={"token": token0},
+            headers={"X-Api-Key": API_KEY},
+        )
+        confirmed1 = client.post(
+            "/api/filaments/service/swap/confirm?printer_index=1",
+            json={"token": token1},
+            headers={"X-Api-Key": API_KEY},
+        )
+        still0 = client.get(
+            "/api/filaments/service/swap?printer_index=0",
+            headers={"X-Api-Key": API_KEY},
+        )
+        confirmed0 = client.post(
+            "/api/filaments/service/swap/confirm?printer_index=0",
+            json={"token": token0},
+            headers={"X-Api-Key": API_KEY},
+        )
+    finally:
+        _restore_state(old_values, old_svc, old_filaments, old_swap)
+
+    assert started0.status_code == 200
+    assert started1.status_code == 200
+    assert token0 is not None
+    assert token1 is not None
+    assert token0 != token1
+    assert state0.status_code == 200
+    assert state0.get_json()["swap"]["printer_index"] == 0
+    assert state1.status_code == 200
+    assert state1.get_json()["swap"]["printer_index"] == 1
+    assert mismatch.status_code == 409
+    assert confirmed1.status_code == 200
+    assert confirmed1.get_json()["pending"] is False
+    assert still0.status_code == 200
+    assert still0.get_json()["pending"] is True
+    assert still0.get_json()["swap"]["token"] == token0
+    assert confirmed0.status_code == 200
+    assert confirmed0.get_json()["pending"] is False
+    assert sent0 == ["M104 S140"]
+    assert sent1 == ["M104 S140"]
 
 
 def test_filament_swap_routes_cover_legacy_start_confirm_and_cancel(tmp_path, monkeypatch):
