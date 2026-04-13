@@ -198,10 +198,23 @@ def test_timelapse_prunes_old_videos(tmp_path):
         path.write_bytes(name.encode())
         time.sleep(0.01)
 
+    old_snapshots = tmp_path / "snapshots" / "old"
+    old_snapshots.mkdir(parents=True)
+    (old_snapshots / "frame_00000.jpg").write_bytes(b"old-frame")
+    svc._write_meta(
+        old_snapshots,
+        "old.gcode",
+        1,
+        video_filename="old.mp4",
+        archived_at="2026-04-10T12:00:00",
+        status="archived",
+    )
+
     svc._prune_old_videos()
 
     remaining = sorted(p.name for p in tmp_path.glob("*.mp4"))
     assert remaining == ["mid.mp4", "new.mp4"]
+    assert not old_snapshots.exists()
 
 
 def test_timelapse_resolves_ffmpeg_through_web_fallback(monkeypatch):

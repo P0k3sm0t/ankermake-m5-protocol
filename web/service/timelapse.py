@@ -1259,7 +1259,14 @@ class TimelapseService:
             while len(videos) > self._max_videos:
                 oldest = videos.pop(0)
                 os.remove(os.path.join(self._captures_dir, oldest))
-                log.info(f"Timelapse: pruned old video {oldest}")
+                removed_collections = self._delete_snapshot_collections_for_video(oldest)
+                if removed_collections:
+                    log.info(
+                        f"Timelapse: pruned old video {oldest} and snapshot collection(s) "
+                        f"{', '.join(removed_collections)}"
+                    )
+                else:
+                    log.info(f"Timelapse: pruned old video {oldest}")
         except OSError as err:
             log.warning(f"Timelapse: prune failed: {err}")
 
@@ -1446,6 +1453,8 @@ class TimelapseService:
                 if not os.path.isdir(dir_path):
                     continue
                 meta = self._read_meta(dir_path) or {}
+                if not self._media_name_belongs_to_this_printer(name, meta):
+                    continue
                 meta_video = self._safe_path_component(meta.get("video_filename"))
                 if name == safe_stem or meta_video == safe_video:
                     real_path = os.path.realpath(dir_path)
@@ -1457,15 +1466,19 @@ class TimelapseService:
             return []
         return matches
 
+    def _delete_snapshot_collections_for_video(self, filename):
+        removed_collections = []
+        for collection_dir in self._snapshot_collection_dirs_for_video(filename):
+            shutil.rmtree(collection_dir, ignore_errors=True)
+            removed_collections.append(os.path.basename(collection_dir))
+        return removed_collections
+
     def delete_video(self, filename):
         """Delete a timelapse video."""
         path = self.get_video_path(filename)
         if path:
             os.remove(path)
-            removed_collections = []
-            for collection_dir in self._snapshot_collection_dirs_for_video(filename):
-                shutil.rmtree(collection_dir, ignore_errors=True)
-                removed_collections.append(os.path.basename(collection_dir))
+            removed_collections = self._delete_snapshot_collections_for_video(filename)
             if removed_collections:
                 log.info(
                     f"Timelapse: deleted {filename} and snapshot collection(s) "
