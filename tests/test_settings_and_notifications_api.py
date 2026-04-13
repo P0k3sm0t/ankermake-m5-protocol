@@ -244,6 +244,48 @@ def test_camera_settings_endpoints_persist_per_printer():
     assert "SN2" not in cfg.camera["per_printer"]
 
 
+def test_camera_settings_endpoints_honor_requested_printer_index():
+    client = app.test_client()
+    cfg = _base_config()
+    cfg.printers.append(_printer(sn="SN2", name="Printer 2"))
+    old, old_svc, cfg, _mqtt = _install_app_state(cfg=cfg)
+
+    try:
+        updated = client.post(
+            "/api/settings/camera?printer_index=1",
+            json={
+                "camera": {
+                    "source": "external",
+                    "external": {
+                        "name": "Thing 2 Cam",
+                        "snapshot_url": "http://thing2.local/snapshot.jpg",
+                        "refresh_sec": 2,
+                    },
+                }
+            },
+            headers={"X-Api-Key": "secret-key-123456"},
+        )
+        first_printer = client.get(
+            "/api/settings/camera?printer_index=0",
+            headers={"X-Api-Key": "secret-key-123456"},
+        )
+        second_printer = client.get(
+            "/api/settings/camera?printer_index=1",
+            headers={"X-Api-Key": "secret-key-123456"},
+        )
+    finally:
+        _restore_app_state(old, old_svc)
+
+    assert updated.status_code == 200
+    assert first_printer.status_code == 200
+    assert second_printer.status_code == 200
+    assert first_printer.get_json()["camera"]["source"] == "printer"
+    assert second_printer.get_json()["camera"]["source"] == "external"
+    assert second_printer.get_json()["camera"]["external"]["name"] == "Thing 2 Cam"
+    assert "SN1" not in cfg.camera["per_printer"]
+    assert cfg.camera["per_printer"]["SN2"]["source"] == "external"
+
+
 def test_timelapse_settings_endpoints_persist_per_printer():
     client = app.test_client()
     cfg = _base_config()
@@ -254,7 +296,7 @@ def test_timelapse_settings_endpoints_persist_per_printer():
         got = client.get("/api/settings/timelapse", headers={"X-Api-Key": "secret-key-123456"})
         updated = client.post(
             "/api/settings/timelapse",
-            json={"timelapse": {"enabled": True, "interval": 12, "light": "snapshot"}},
+            json={"timelapse": {"enabled": True, "interval": 12, "light": "snapshot", "camera_source": "external"}},
             headers={"X-Api-Key": "secret-key-123456"},
         )
         app.config["printer_index"] = 1
@@ -267,13 +309,16 @@ def test_timelapse_settings_endpoints_persist_per_printer():
     assert updated.get_json()["timelapse"]["enabled"] is True
     assert updated.get_json()["timelapse"]["interval"] == 12
     assert updated.get_json()["timelapse"]["light"] == "snapshot"
+    assert updated.get_json()["timelapse"]["camera_source"] == "external"
     assert cfg.timelapse["per_printer"]["SN1"]["enabled"] is True
     assert cfg.timelapse["per_printer"]["SN1"]["interval"] == 12
     assert cfg.timelapse["per_printer"]["SN1"]["light"] == "snapshot"
+    assert cfg.timelapse["per_printer"]["SN1"]["camera_source"] == "external"
     assert "SN2" not in cfg.timelapse["per_printer"]
     assert other_printer.status_code == 200
     assert other_printer.get_json()["timelapse"]["enabled"] is False
     assert other_printer.get_json()["timelapse"]["interval"] == 30
+    assert other_printer.get_json()["timelapse"]["camera_source"] == "follow"
 
 
 def test_launcher_bat_download_uses_requested_install_dir():

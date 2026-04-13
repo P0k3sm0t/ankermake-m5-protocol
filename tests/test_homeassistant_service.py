@@ -2,7 +2,7 @@ import json
 from contextlib import contextmanager
 from types import SimpleNamespace
 
-from web import app
+import web as web_module
 from web.service.homeassistant import HomeAssistantService
 
 
@@ -105,8 +105,8 @@ def test_homeassistant_on_connect_and_light_command(monkeypatch):
     svc = HomeAssistantService(FakeConfigManager(_service_config()), printer_sn="SN123", printer_name="Printer")
     client = FakeMQTTClient()
     light_calls = []
-    old_svc = app.svc
-    app.svc = SimpleNamespace(svcs={"videoqueue": SimpleNamespace(api_light_state=lambda state: light_calls.append(state))})
+    old_svc = web_module.app.svc
+    web_module.app.svc = SimpleNamespace(svcs={"videoqueue": SimpleNamespace(api_light_state=lambda state: light_calls.append(state))})
 
     class FakeThread:
         def __init__(self, target=None, args=None, daemon=None, name=None):
@@ -132,7 +132,7 @@ def test_homeassistant_on_connect_and_light_command(monkeypatch):
         svc._on_connect(client, None, None, 0)
         svc._handle_light_command("ON")
     finally:
-        app.svc = old_svc
+        web_module.app.svc = old_svc
 
     assert svc._connected is True
     assert ("ankerctl/SN123/light/set", 1) in client.subscriptions

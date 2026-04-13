@@ -70,6 +70,10 @@ $(function () {
         return (typeof(temp) === "number") ? Math.round(temp / 100) : null;
     }
 
+    function formatServiceTempValue(temp) {
+        return Number.isFinite(Number(temp)) ? `${Math.round(Number(temp))}°C` : "--";
+    }
+
     /**
      * Calculate the percentage between two numbers
      * @param {number} layer
@@ -538,10 +542,16 @@ $(function () {
         externalName: null,
         externalConfigured: false,
         externalRefreshSec: 3,
+        externalStreamPreview: false,
+        previewError: null,
     };
     let _cameraSettingsLoading = false;
     let _externalCameraPreviewTimer = null;
     let _externalCameraPreviewToken = 0;
+    let _externalCameraPreviewObjectUrl = null;
+    let _externalCameraPreviewEnabled = true;
+    let _externalCameraPreviewContextKey = null;
+    let _externalCameraPreviewStreamActive = false;
     let videoEnabled = false;
 
     function setFilamentState(label, detail = null, detailTone = null) {
@@ -730,7 +740,30 @@ $(function () {
         _cameraState.externalName = camera.external_name || null;
         _cameraState.externalConfigured = !!camera.external_configured;
         _cameraState.externalRefreshSec = Math.max(1, Number(camera.external_refresh_sec || 3));
+        _cameraState.externalStreamPreview = !!camera.external_stream_preview;
+        _cameraState.previewError = null;
         renderCameraUi();
+    }
+
+    function renderCameraStatusText() {
+        let detail = String(_cameraState.detail || "").trim();
+        if (_cameraState.effectiveSource === "external" && !_externalCameraPreviewEnabled) {
+            const disabledDetail = "External camera preview is disabled. Click Enable Preview to start live view.";
+            detail = detail ? `${detail} ${disabledDetail}` : disabledDetail;
+        }
+        if (_cameraState.previewError && _cameraState.effectiveSource === "external") {
+            const previewDetail = `Preview error: ${_cameraState.previewError}`;
+            detail = detail ? `${detail} ${previewDetail}` : previewDetail;
+        }
+        if (_cameraState.effectiveSource === "printer" && typeof videoEnabled !== "undefined" && !videoEnabled) {
+            detail = detail ? `${detail} Enable printer video to start live view.` : "Enable printer video to start live view.";
+        }
+
+        const status = $("#camera-source-status");
+        status
+            .text(detail || "No camera source selected.")
+            .toggleClass("text-danger", !!_cameraState.previewError && _cameraState.effectiveSource === "external")
+            .toggleClass("text-muted", !(_cameraState.previewError && _cameraState.effectiveSource === "external"));
     }
 
     function stopExternalCameraPreview(resetImage = true) {
@@ -739,20 +772,105 @@ $(function () {
             clearTimeout(_externalCameraPreviewTimer);
             _externalCameraPreviewTimer = null;
         }
+        if (_externalCameraPreviewObjectUrl) {
+            URL.revokeObjectURL(_externalCameraPreviewObjectUrl);
+            _externalCameraPreviewObjectUrl = null;
+        }
         const img = document.getElementById("external-camera-preview");
         if (img) {
             img.onload = null;
             img.onerror = null;
-            if (resetImage) {
+            if (_externalCameraPreviewStreamActive) {
+                img.src = "";
+                _externalCameraPreviewStreamActive = false;
+            } else if (resetImage) {
                 img.src = "/static/img/load-screen.svg";
             }
         }
     }
 
-    function scheduleExternalCameraPreview(delayMs) {
-        if (_cameraState.effectiveSource !== "external") {
+    function setExternalCameraPreviewEnabled(enabled) {
+        _externalCameraPreviewEnabled = !!enabled;
+        if (!_externalCameraPreviewEnabled) {
+            _cameraState.previewError = null;
+        }
+        renderCameraUi();
+    }
+
+    function ensureExternalCameraControls() {
+        const printerControls = $("#printer-camera-controls");
+        let controls = $("#external-camera-controls");
+
+        if (!controls.length && printerControls.length) {
+            controls = $(`
+                <div id="external-camera-controls" class="d-none mt-2">
+                    <div class="row g-2"></div>
+                </div>
+            `);
+            controls.insertAfter(printerControls);
+        }
+
+        if (!controls.length) {
+            return $();
+        }
+
+        let row = controls.find(".row.g-2").first();
+        if (!row.length) {
+            row = $('<div class="row g-2"></div>');
+            controls.append(row);
+        }
+
+        if (!controls.find("#external-preview-toggle").length) {
+            const toggleCol = $(`
+                <div class="col-6">
+                    <button class="w-100 btn btn-secondary camera-control-btn external-preview-toggle" id="external-preview-toggle" aria-pressed="true">
+                        <i class="bi bi-camera-video-off"></i> Disable Preview
+                    </button>
+                </div>
+            `);
+            const snapshotCol = row.find("#snapshot-btn-secondary").closest(".col-6");
+            if (snapshotCol.length) {
+                toggleCol.insertBefore(snapshotCol);
+            } else {
+                row.append(toggleCol);
+            }
+        }
+
+        if (!controls.find("#snapshot-btn-secondary").length) {
+            row.append(`
+                <div class="col-6">
+                    <button class="w-100 btn btn-secondary camera-control-btn" id="snapshot-btn-secondary" title="Download Snapshot">
+                        <i class="bi bi-camera"></i> Snapshot
+                    </button>
+                </div>
+            `);
+        }
+
+        return controls;
+    }
+
+    function renderExternalCameraPreviewToggle() {
+        ensureExternalCameraControls();
+        const buttons = $(".external-preview-toggle");
+        if (!buttons.length) {
             return;
         }
+        if (_externalCameraPreviewEnabled) {
+            buttons
+                .html('<i class="bi bi-camera-video-off"></i> Disable Preview')
+                .attr("aria-pressed", "true");
+        } else {
+            buttons
+                .html('<i class="bi bi-camera-video"></i> Enable Preview')
+                .attr("aria-pressed", "false");
+        }
+    }
+
+    function scheduleExternalCameraPreview(delayMs) {
+        if (_cameraState.effectiveSource !== "external" || !_externalCameraPreviewEnabled) {
+            return;
+        }
+        _externalCameraPreviewStreamActive = false;
         if (_externalCameraPreviewTimer) {
             clearTimeout(_externalCameraPreviewTimer);
         }
@@ -763,20 +881,86 @@ $(function () {
             }
             const token = _externalCameraPreviewToken;
             const refreshMs = Math.max(1000, Math.round(_cameraState.externalRefreshSec * 1000));
-            img.onload = function () {
-                if (token !== _externalCameraPreviewToken) {
-                    return;
-                }
-                scheduleExternalCameraPreview(refreshMs);
+            const startedAt = Date.now();
+            const scheduleNext = function () {
+                const elapsedMs = Date.now() - startedAt;
+                scheduleExternalCameraPreview(Math.max(0, refreshMs - elapsedMs));
             };
-            img.onerror = function () {
-                if (token !== _externalCameraPreviewToken) {
-                    return;
-                }
-                scheduleExternalCameraPreview(refreshMs);
-            };
-            img.src = `/api/camera/frame?printer_index=${encodeURIComponent(getActivePrinterIndex())}&ts=${Date.now()}`;
+            fetch(`/api/camera/frame?printer_index=${encodeURIComponent(getActivePrinterIndex())}&ts=${Date.now()}`, {
+                cache: "no-store",
+            })
+                .then(async (resp) => {
+                    if (!resp.ok) {
+                        const data = await resp.json().catch(() => ({}));
+                        throw new Error(data.error || `External camera preview failed (HTTP ${resp.status})`);
+                    }
+                    return resp.blob();
+                })
+                .then((blob) => {
+                    if (token !== _externalCameraPreviewToken) {
+                        return;
+                    }
+                    const nextUrl = URL.createObjectURL(blob);
+                    img.onload = function () {
+                        if (token !== _externalCameraPreviewToken) {
+                            URL.revokeObjectURL(nextUrl);
+                            return;
+                        }
+                        if (_externalCameraPreviewObjectUrl) {
+                            URL.revokeObjectURL(_externalCameraPreviewObjectUrl);
+                        }
+                        _externalCameraPreviewObjectUrl = nextUrl;
+                        _cameraState.previewError = null;
+                        renderCameraStatusText();
+                        scheduleNext();
+                    };
+                    img.onerror = function () {
+                        URL.revokeObjectURL(nextUrl);
+                        if (token !== _externalCameraPreviewToken) {
+                            return;
+                        }
+                        _cameraState.previewError = "The external camera returned a frame that could not be displayed.";
+                        renderCameraStatusText();
+                        scheduleNext();
+                    };
+                    img.src = nextUrl;
+                })
+                .catch((err) => {
+                    if (token !== _externalCameraPreviewToken) {
+                        return;
+                    }
+                    _cameraState.previewError = err && err.message ? err.message : String(err);
+                    renderCameraStatusText();
+                    scheduleNext();
+                });
         }, Math.max(0, delayMs || 0));
+    }
+
+    function startExternalCameraStreamPreview() {
+        const img = document.getElementById("external-camera-preview");
+        if (!img || _cameraState.effectiveSource !== "external" || !_externalCameraPreviewEnabled) {
+            return;
+        }
+        const token = _externalCameraPreviewToken;
+        const streamUrl = `/api/camera/stream?printer_index=${encodeURIComponent(getActivePrinterIndex())}&ts=${Date.now()}`;
+        _externalCameraPreviewStreamActive = true;
+        img.onload = function () {
+            if (token !== _externalCameraPreviewToken) {
+                return;
+            }
+            _cameraState.previewError = null;
+            renderCameraStatusText();
+        };
+        img.onerror = function () {
+            if (token !== _externalCameraPreviewToken) {
+                return;
+            }
+            _externalCameraPreviewStreamActive = false;
+            _cameraState.previewError = "External camera live stream ended; falling back to snapshot preview.";
+            renderCameraStatusText();
+            scheduleExternalCameraPreview(1000);
+        };
+        img.src = streamUrl;
     }
 
     function renderCameraUi() {
@@ -787,31 +971,46 @@ $(function () {
             select.val(_cameraState.source || "printer");
         }
 
-        let detail = String(_cameraState.detail || "").trim();
-        if (_cameraState.effectiveSource === "printer" && typeof videoEnabled !== "undefined" && !videoEnabled) {
-            detail = detail ? `${detail} Enable printer video to start live view.` : "Enable printer video to start live view.";
-        }
-        $("#camera-source-status").text(detail || "No camera source selected.");
+        renderExternalCameraPreviewToggle();
+        renderCameraStatusText();
 
         const printerMode = _cameraState.effectiveSource === "printer";
         const externalMode = _cameraState.effectiveSource === "external";
+        const externalPreviewKey = externalMode
+            ? `${getActivePrinterIndex()}:${_cameraState.externalName || ""}:${_cameraState.externalStreamPreview ? "stream" : "frames"}`
+            : null;
 
         if (!printerMode) {
             $("#vplayer").hide();
         }
-        $("#video-toggle-container").toggle(printerMode);
         $("#external-camera-container").toggle(externalMode);
+        const externalPreviewVisible = externalMode && _externalCameraPreviewEnabled;
+        $("#external-camera-preview")
+            .toggleClass("d-block", externalPreviewVisible)
+            .toggleClass("d-none", !externalPreviewVisible);
         $("#camera-unavailable").toggle(!printerMode && !externalMode);
 
-        $("#printer-camera-controls").toggle(printerMode);
+        $("#printer-camera-controls").toggle(printerMode || externalMode);
+        $("#light-on-col, #light-off-col")
+            .toggle(printerMode || externalMode)
+            .toggleClass("col-6", printerMode || externalMode);
+        $("#printer-video-toggle-col, #printer-snapshot-col").toggle(printerMode);
         $("#printer-camera-quality-wrap").toggle(printerMode);
-        $("#external-camera-controls").toggleClass("d-none", !externalMode);
+        ensureExternalCameraControls().toggleClass("d-none", !externalMode);
 
-        if (externalMode) {
-            stopExternalCameraPreview(false);
-            scheduleExternalCameraPreview(0);
+        if (externalMode && _externalCameraPreviewEnabled) {
+            if (_externalCameraPreviewContextKey !== externalPreviewKey) {
+                stopExternalCameraPreview(false);
+                _externalCameraPreviewContextKey = externalPreviewKey;
+                if (_cameraState.externalStreamPreview) {
+                    startExternalCameraStreamPreview();
+                } else {
+                    scheduleExternalCameraPreview(0);
+                }
+            }
         } else {
-            stopExternalCameraPreview();
+            stopExternalCameraPreview(!externalMode);
+            _externalCameraPreviewContextKey = null;
         }
     }
 
@@ -838,6 +1037,15 @@ $(function () {
         _timelapseRuntime.promptFilename = timelapse.prompt_filename || null;
         _timelapseRuntime.resumeAvailable = !!timelapse.resume_available;
         _timelapseRuntime.resumeFrameCount = Number(timelapse.resume_frame_count || 0);
+        if (Object.prototype.hasOwnProperty.call(data, "temperature")) {
+            const temperature = data.temperature || {};
+            updateFilamentServiceTemps({
+                nozzleCurrent: temperature.nozzle,
+                nozzleTarget: temperature.nozzle_target,
+                bedCurrent: temperature.bed,
+                bedTarget: temperature.bed_target,
+            });
+        }
         applyCameraRuntimeState(data.camera || {});
 
         if (data.print && data.print.state !== undefined) {
@@ -1068,6 +1276,12 @@ $(function () {
         }
 
         connect() {
+            if (this.reconnect !== false && !this.autoReconnect) {
+                return;
+            }
+            if (this.ws) {
+                return;
+            }
             var ws = this.ws = new WebSocket(this.url);
             if (this.binary)
                 ws.binaryType = "arraybuffer";
@@ -1189,7 +1403,7 @@ $(function () {
     }
 
     async function zOffsetRequest(url, payload = null) {
-        const resp = await fetch(url, {
+        const resp = await fetch(withActivePrinterQuery(url), {
             method: payload ? "POST" : "GET",
             headers: payload ? { "Content-Type": "application/json" } : undefined,
             body: payload ? JSON.stringify(payload) : undefined,
@@ -1273,6 +1487,9 @@ $(function () {
                 }
             } else if (data.commandType == 1001) {
                 // ZZ_MQTT_CMD_PRINT_SCHEDULE: time=remaining, totalTime=elapsed, progress=0-10000
+                if (data.name && _isPrintStateActive()) {
+                    $("#print-name").text(data.name);
+                }
                 const remainingText = getTime(data.time);
                 if (remainingText !== null) {
                     $("#time-remain").text(remainingText);
@@ -1301,6 +1518,14 @@ $(function () {
                     if (!$("#set-nozzle-temp").is(":focus")) {
                         $("#set-nozzle-temp").val(target);
                     }
+                    updateFilamentServiceTemps({
+                        nozzleCurrent: current,
+                        nozzleTarget: target,
+                    });
+                } else {
+                    updateFilamentServiceTemps({
+                        nozzleCurrent: current,
+                    });
                 }
                 pushTempData("nozzle", getTemp(data.currentTemp), getTemp(data.targetTemp));
             } else if (data.commandType == 1004) {
@@ -1312,6 +1537,14 @@ $(function () {
                     if (!$("#set-bed-temp").is(":focus")) {
                         $("#set-bed-temp").val(target);
                     }
+                    updateFilamentServiceTemps({
+                        bedCurrent: current,
+                        bedTarget: target,
+                    });
+                } else {
+                    updateFilamentServiceTemps({
+                        bedCurrent: current,
+                    });
                 }
                 pushTempData("bed", getTemp(data.currentTemp), getTemp(data.targetTemp));
             } else if (data.commandType == 1006) {
@@ -1369,10 +1602,12 @@ $(function () {
                 }
                 renderFilamentStatus();
             } else if (data.commandType == 1044) {
-                // Print start notification — extract basename from filePath
+                // Print start notification or storage preview; only active prints should rename Home.
                 const filePath = data.filePath || "";
                 const baseName = filePath.split("/").pop().split("\\").pop();
-                $("#print-name").text(baseName);
+                if (baseName && _isPrintStateActive() && !_isStoredFileSourcePath(filePath)) {
+                    $("#print-name").text(baseName);
+                }
             } else if (data.commandType == 1052) {
                 // Returns Layer Info — layer display only; progress comes from ct=1001
                 const layer = `${data.real_print_layer} / ${data.total_layer}`;
@@ -1393,6 +1628,12 @@ $(function () {
             $("#set-nozzle-temp").val(0);
             $("#bed-temp").text("0°C");
             $("#set-bed-temp").val(0);
+            updateFilamentServiceTemps({
+                nozzleCurrent: null,
+                nozzleTarget: null,
+                bedCurrent: null,
+                bedTarget: null,
+            });
             $("#print-speed").text("0mm/s");
             $("#print-layer").text("0 / 0");
             _filamentStatus.label = "Unknown";
@@ -1714,6 +1955,10 @@ $(function () {
 
     $("#video-toggle").on("click", function () {
         setPrinterVideoEnabled(!videoEnabled);
+    });
+
+    $(document).on("click", ".external-preview-toggle, #external-preview-toggle", function () {
+        setExternalCameraPreviewEnabled(!_externalCameraPreviewEnabled);
     });
 
     /**
@@ -2112,7 +2357,7 @@ $(function () {
         statusEl.className = "mb-3 text-muted small";
         statusEl.textContent = "Reading printer settings...";
 
-        const resp = await fetch("/api/printer/settings-summary");
+        const resp = await fetch(withActivePrinterQuery("/api/printer/settings-summary"));
         const data = await resp.json().catch(() => ({}));
         if (!resp.ok) {
             throw new Error(data.error || `HTTP ${resp.status}`);
@@ -2240,7 +2485,7 @@ $(function () {
      */
     function sendPrinterGCode(gcode) {
         if (!gcode) return;
-        fetch("/api/printer/gcode", {
+        fetch(withActivePrinterQuery("/api/printer/gcode"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ gcode: gcode })
@@ -2249,7 +2494,7 @@ $(function () {
 
     function sendPrinterHome(axis) {
         const targetAxis = axis || "all";
-        fetch("/api/printer/home", {
+        fetch(withActivePrinterQuery("/api/printer/home"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ axis: targetAxis })
@@ -2257,7 +2502,7 @@ $(function () {
     }
 
     function sendPrintControl(value) {
-        fetch("/api/printer/control", {
+        fetch(withActivePrinterQuery("/api/printer/control"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ value: value })
@@ -2282,6 +2527,21 @@ $(function () {
             return PRINT_STATE.PRINTING;
         }
         return value;
+    }
+
+    function _isPrintStateActive(state = _currentPrintState) {
+        const normalizedState = _normalizePrintStateValue(state);
+        return normalizedState === PRINT_STATE.PRINTING
+            || normalizedState === PRINT_STATE.PAUSED
+            || normalizedState === PRINT_STATE.CALIBRATING
+            || normalizedState === PRINT_STATE.STOPPING
+            || normalizedState === PRINT_STATE.PENDING_START;
+    }
+
+    function _isStoredFileSourcePath(filePath) {
+        const path = String(filePath || "");
+        return path.startsWith("/tmp/udisk/")
+            || path.startsWith("/usr/data/local/model/");
     }
 
     function _updatePrintControlButtons(state) {
@@ -2609,7 +2869,7 @@ $(function () {
         if (readBtn) readBtn.prop ? $(readBtn).prop("disabled", true) : (readBtn.disabled = true);
 
         try {
-            const resp = await fetch("/api/printer/bed-leveling");
+            const resp = await fetch(withActivePrinterQuery("/api/printer/bed-leveling"));
             const data = await resp.json();
 
             if (!resp.ok) {
@@ -2679,7 +2939,7 @@ $(function () {
                 '<span class="spinner-border spinner-border-sm me-2" role="status"></span>' +
                 'Reading live data from printer...</div>';
             try {
-                const resp = await fetch("/api/printer/bed-leveling");
+                const resp = await fetch(withActivePrinterQuery("/api/printer/bed-leveling"));
                 const parsed = await resp.json();
                 if (!resp.ok) {
                     statusEl.innerHTML =
@@ -2752,7 +3012,7 @@ $(function () {
         if (gridEl) gridEl.style.display = "none";
 
         try {
-            const resp = await fetch("/api/printer/bed-leveling/last");
+            const resp = await fetch(withActivePrinterQuery("/api/printer/bed-leveling/last"));
             const data = await resp.json();
 
             if (!resp.ok) {
@@ -2854,7 +3114,7 @@ $(function () {
         const btn = $(this);
         btn.prop("disabled", true).html('<i class="bi bi-hourglass-split"></i> Leveling...');
         try {
-            const resp = await fetch("/api/printer/autolevel", { method: "POST" });
+            const resp = await fetch(withActivePrinterQuery("/api/printer/autolevel"), { method: "POST" });
             if (resp.ok) {
                 flash_message("Auto-Leveling started — the printer will now probe the bed.", "success");
 
@@ -2924,7 +3184,7 @@ $(function () {
     /**
      * Snapshot Button
      */
-    $("#snapshot-btn, #snapshot-btn-secondary").on("click", async function () {
+    $(document).on("click", "#snapshot-btn, #snapshot-btn-secondary", async function () {
         const btn = $(this);
         btn.prop("disabled", true);
         try {
@@ -2959,7 +3219,6 @@ $(function () {
         $("#camera-external-name").val(camera && camera.external ? camera.external.name || "" : "");
         $("#camera-external-stream-url").val(camera && camera.external ? camera.external.stream_url || "" : "");
         $("#camera-external-snapshot-url").val(camera && camera.external ? camera.external.snapshot_url || "" : "");
-        $("#camera-external-refresh").val(camera && camera.external ? camera.external.refresh_sec || 3 : 3);
     }
 
     async function loadCameraSettings() {
@@ -2968,7 +3227,7 @@ $(function () {
         }
         _cameraSettingsLoading = true;
         try {
-            const resp = await fetch("/api/settings/camera");
+            const resp = await fetch(withActivePrinterQuery("/api/settings/camera"));
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok) {
                 throw new Error(data.error || `HTTP ${resp.status}`);
@@ -2983,7 +3242,7 @@ $(function () {
     }
 
     async function saveCameraSettings(payload, successMessage = null) {
-        const resp = await fetch("/api/settings/camera", {
+        const resp = await fetch(withActivePrinterQuery("/api/settings/camera"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ camera: payload }),
@@ -3012,7 +3271,6 @@ $(function () {
                     name: $("#camera-external-name").val().trim(),
                     stream_url: $("#camera-external-stream-url").val().trim(),
                     snapshot_url: $("#camera-external-snapshot-url").val().trim(),
-                    refresh_sec: parseInt($("#camera-external-refresh").val(), 10) || 3,
                 },
             }, "External camera settings saved");
         } catch (err) {
@@ -3301,7 +3559,7 @@ $(function () {
         _gcodeStorageRefreshDeferred = false;
         status.text(`Loading ${gcodeStorageSourceLabel(source)} files...`);
         try {
-            const resp = await fetch(`/api/files/printer?source=${encodeURIComponent(source)}`);
+            const resp = await fetch(withActivePrinterQuery(`/api/files/printer?source=${encodeURIComponent(source)}`));
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok) {
                 throw new Error(data.error || `HTTP ${resp.status}`);
@@ -3342,7 +3600,7 @@ $(function () {
         }
 
         gcodeLog(`» ${normalized.replace(/\n/g, " | ")}`);
-        const resp = await fetch("/api/printer/gcode", {
+        const resp = await fetch(withActivePrinterQuery("/api/printer/gcode"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ gcode: normalized })
@@ -3371,7 +3629,7 @@ $(function () {
         const action = startPrint ? "Uploading print job" : "Uploading file";
         gcodeLog(`» ${action}: ${file.name} (${formatBytes(file.size)})`);
 
-        const resp = await fetch("/api/files/local", {
+        const resp = await fetch(withActivePrinterQuery("/api/files/local"), {
             method: "POST",
             body: formData,
         });
@@ -3479,7 +3737,7 @@ $(function () {
         setGCodeStorageBusy(true);
         try {
             gcodeLog(`Starting ${fileName} from ${gcodeStorageSourceLabel(source)}`);
-            const resp = await fetch("/api/files/printer/print", {
+            const resp = await fetch(withActivePrinterQuery("/api/files/printer/print"), {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -3491,8 +3749,13 @@ $(function () {
             if (!resp.ok) {
                 throw new Error(data.error || `HTTP ${resp.status}`);
             }
-            gcodeLog(`Printer confirmed stored file start for ${data.name || fileName}`);
-            flash_message(`Printer confirmed ${data.name || fileName} from ${gcodeStorageSourceLabel(source)}.`, "success", 4000);
+            const confirmedName = data.name || fileName;
+            $("#print-name").text(confirmedName);
+            if (_currentPrintState === PRINT_STATE.IDLE) {
+                _updatePrintControlButtons(PRINT_STATE.PENDING_START);
+            }
+            gcodeLog(`Printer confirmed stored file start for ${confirmedName}`);
+            flash_message(`Printer confirmed ${confirmedName} from ${gcodeStorageSourceLabel(source)}.`, "success", 4000);
         } catch (err) {
             gcodeLog(`Failed to start stored file: ${err.message}`);
             flash_message(`Failed to start stored file: ${err.message}`, "danger");
@@ -3717,7 +3980,7 @@ $(function () {
     }
 
     function loadHistory(append) {
-        fetch(`/api/history?limit=${HISTORY_LIMIT}&offset=${historyOffset}`)
+        fetch(withActivePrinterQuery(`/api/history?limit=${HISTORY_LIMIT}&offset=${historyOffset}`))
             .then(r => r.json())
             .then(data => {
                 const tbody = $("#history-tbody");
@@ -3825,7 +4088,7 @@ $(function () {
         const btn = $(this);
         btn.prop("disabled", true);
         try {
-            const resp = await fetch("/api/history/delete", {
+            const resp = await fetch(withActivePrinterQuery("/api/history/delete"), {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ ids }),
@@ -3848,7 +4111,7 @@ $(function () {
 
     $("#history-clear").on("click", function () {
         if (!confirm("Clear all print history?")) return;
-        fetch("/api/history", { method: "DELETE" })
+        fetch(withActivePrinterQuery("/api/history"), { method: "DELETE" })
             .then(() => {
                 selectedHistoryIds.clear();
                 historyOffset = 0;
@@ -3869,7 +4132,7 @@ $(function () {
         }
         btn.prop("disabled", true);
         try {
-            const resp = await fetch(`/api/history/${encodeURIComponent(entryId)}/reprint`, {
+            const resp = await fetch(withActivePrinterQuery(`/api/history/${encodeURIComponent(entryId)}/reprint`), {
                 method: "POST",
             });
             const data = await resp.json().catch(() => ({}));
@@ -3896,6 +4159,7 @@ $(function () {
     let _timelapseSnapshotCollections = [];
     let _timelapseSelectedCollectionId = null;
     let _timelapseSelectedFrameName = null;
+    const selectedTimelapseFiles = new Set();
 
     function getTimelapseSnapshotCollection(id) {
         return _timelapseSnapshotCollections.find(collection => collection.id === id) || null;
@@ -4214,6 +4478,42 @@ $(function () {
         if (placeholderEl) placeholderEl.style.display = "none";
     }
 
+    function updateTimelapseSelectionUi() {
+        const count = selectedTimelapseFiles.size;
+        const deleteButton = $("#timelapse-delete-selected");
+        deleteButton
+            .prop("disabled", count === 0)
+            .html(`<i class="bi bi-trash3"></i> Delete Selected${count > 0 ? ` (${count})` : ""}`);
+
+        const checkboxes = $(".timelapse-select-checkbox");
+        const checked = checkboxes.filter(function () {
+            return $(this).prop("checked");
+        });
+        const selectAll = $("#timelapse-select-all");
+        if (selectAll.length) {
+            const selectAllEl = selectAll.get(0);
+            selectAll.prop("checked", checkboxes.length > 0 && checked.length === checkboxes.length);
+            selectAll.prop("disabled", checkboxes.length === 0);
+            if (selectAllEl) {
+                selectAllEl.indeterminate = checked.length > 0 && checked.length < checkboxes.length;
+            }
+        }
+    }
+
+    async function deleteTimelapseFile(file) {
+        const resp = await fetch(withActivePrinterQuery(`/api/timelapse/${encodeURIComponent(file)}`), { method: "DELETE" });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+            throw new Error(data.error || `HTTP ${resp.status}`);
+        }
+        selectedTimelapseFiles.delete(file);
+        const videoEl = document.getElementById("timelapse-player");
+        if (videoEl && (videoEl.dataset.file || "") === file) {
+            clearTimelapseVideoPreview("Select a video to play");
+        }
+        return data;
+    }
+
     function loadTimelapses() {
         fetch(withActivePrinterQuery("/api/timelapses"))
             .then(r => r.json())
@@ -4229,20 +4529,32 @@ $(function () {
                 list.innerHTML = "";
 
                 if (!Array.isArray(data.videos) || data.videos.length === 0) {
+                    selectedTimelapseFiles.clear();
                     list.innerHTML = '<div class="text-center text-muted py-4">No timelapse videos yet</div>';
                     clearTimelapseVideoPreview("Select a video to play");
+                    updateTimelapseSelectionUi();
                     return;
                 }
 
                 let currentFileStillExists = false;
+                const visibleFiles = new Set(data.videos.map(v => v.filename));
+                selectedTimelapseFiles.forEach(file => {
+                    if (!visibleFiles.has(file)) {
+                        selectedTimelapseFiles.delete(file);
+                    }
+                });
 
                 data.videos.forEach(v => {
                     const created = v.created_at ? new Date(v.created_at).toLocaleString() : "-";
                     const safeFilename = escapeHtml(v.filename);
+                    const isChecked = selectedTimelapseFiles.has(v.filename);
                     const item = document.createElement("div");
-                    item.className = "list-group-item list-group-item-action d-flex justify-content-between align-items-center py-2 px-3";
+                    item.className = "list-group-item list-group-item-action d-flex align-items-center py-2 px-3";
                     item.dataset.file = v.filename;
                     item.innerHTML = `
+                        <div class="form-check me-2 flex-shrink-0">
+                            <input type="checkbox" class="form-check-input timelapse-select-checkbox">
+                        </div>
                         <div class="overflow-hidden me-2" style="cursor:pointer; flex:1; min-width:0;">
                             <div class="text-truncate fw-semibold small">${safeFilename}</div>
                             <div class="text-muted" style="font-size:0.75em;">${created} · ${formatSize(v.size_bytes)}</div>
@@ -4257,6 +4569,13 @@ $(function () {
                         </div>`;
 
                     item.querySelector(".timelapse-delete").dataset.file = v.filename;
+                    const checkbox = item.querySelector(".timelapse-select-checkbox");
+                    if (checkbox) {
+                        checkbox.dataset.file = v.filename;
+                        checkbox.checked = isChecked;
+                        checkbox.setAttribute("aria-label", `Select ${v.filename}`);
+                        checkbox.addEventListener("click", event => event.stopPropagation());
+                    }
 
                     if (currentFile && currentFile === v.filename) {
                         item.classList.add("active");
@@ -4270,6 +4589,7 @@ $(function () {
                 if (currentFile && !currentFileStillExists) {
                     clearTimelapseVideoPreview("Select a video to play");
                 }
+                updateTimelapseSelectionUi();
             })
             .catch(err => console.error("Timelapse load failed:", err));
     }
@@ -4456,19 +4776,90 @@ $(function () {
         }
     });
 
-    // Delete timelapse (list button or player delete button)
-    $(document).on("click", ".timelapse-delete", function () {
-        const file = $(this).data("file");
-        if (!confirm(`Delete timelapse ${file}?`)) return;
-        fetch(withActivePrinterQuery(`/api/timelapse/${encodeURIComponent(file)}`), { method: "DELETE" })
-            .then(() => {
-                const videoEl = document.getElementById("timelapse-player");
-                if (videoEl && (videoEl.dataset.file || "") === file) {
-                    clearTimelapseVideoPreview("Select a video to play");
+    $(document).on("change", ".timelapse-select-checkbox", function () {
+        const file = $(this).attr("data-file") || $(this).data("file");
+        if (!file) {
+            return;
+        }
+        if ($(this).prop("checked")) {
+            selectedTimelapseFiles.add(file);
+        } else {
+            selectedTimelapseFiles.delete(file);
+        }
+        updateTimelapseSelectionUi();
+    });
+
+    $("#timelapse-select-all").on("change", function () {
+        const checked = $(this).prop("checked");
+        $(".timelapse-select-checkbox").each(function () {
+            const checkbox = $(this);
+            const file = checkbox.attr("data-file") || checkbox.data("file");
+            if (!file) {
+                return;
+            }
+            checkbox.prop("checked", checked);
+            if (checked) {
+                selectedTimelapseFiles.add(file);
+            } else {
+                selectedTimelapseFiles.delete(file);
+            }
+        });
+        updateTimelapseSelectionUi();
+    });
+
+    $("#timelapse-delete-selected").on("click", async function () {
+        const files = Array.from(selectedTimelapseFiles);
+        if (!files.length) {
+            flash_message("Select one or more timelapse videos first.", "warning");
+            return;
+        }
+        if (!confirm(`Delete ${files.length} selected timelapse video${files.length === 1 ? "" : "s"}?`)) {
+            return;
+        }
+        const btn = $(this);
+        btn.prop("disabled", true);
+        const failures = [];
+        let deleted = 0;
+        try {
+            for (const file of files) {
+                try {
+                    await deleteTimelapseFile(file);
+                    deleted += 1;
+                } catch (err) {
+                    failures.push(`${file}: ${err.message || err}`);
                 }
-                loadTimelapses();
-                loadTimelapseSnapshots();
-            });
+            }
+            await loadTimelapses();
+            await loadTimelapseSnapshots();
+            if (deleted > 0) {
+                flash_message(`Deleted ${deleted} timelapse video${deleted === 1 ? "" : "s"}.`, "success", 4000);
+            }
+            if (failures.length) {
+                flash_message(`Some timelapse videos could not be deleted: ${failures.join("; ")}`, "danger", 8000);
+            }
+        } finally {
+            btn.prop("disabled", false);
+            updateTimelapseSelectionUi();
+        }
+    });
+
+    // Delete timelapse (list button or player delete button)
+    $(document).on("click", ".timelapse-delete", async function () {
+        const btn = $(this);
+        const file = btn.attr("data-file") || btn.data("file");
+        if (!file || !confirm(`Delete timelapse ${file}?`)) return;
+        btn.prop("disabled", true);
+        try {
+            await deleteTimelapseFile(file);
+            flash_message(`Deleted timelapse ${file}.`, "success", 4000);
+            await loadTimelapses();
+            await loadTimelapseSnapshots();
+        } catch (err) {
+            flash_message(`Timelapse delete failed: ${err.message || err}`, "danger", 6000);
+        } finally {
+            btn.prop("disabled", false);
+            updateTimelapseSelectionUi();
+        }
     });
 
     /**
@@ -4481,6 +4872,7 @@ $(function () {
             interval: $("#timelapse-interval"),
             maxVideos: $("#timelapse-max-videos"),
             persistent: $("#timelapse-persistent"),
+            cameraSource: $("#timelapse-camera-source"),
             light: $("#timelapse-light"),
         };
         const tlSaveBtn = $("#timelapse-save");
@@ -4495,6 +4887,7 @@ $(function () {
                     tlFields.interval.val(cfg.interval || 30);
                     tlFields.maxVideos.val(cfg.max_videos || 10);
                     tlFields.persistent.prop("checked", cfg.save_persistent !== false);
+                    tlFields.cameraSource.val(cfg.camera_source || "follow");
                     tlFields.light.val(cfg.light || "");
                 }
             } catch (err) {
@@ -4511,6 +4904,7 @@ $(function () {
                     interval: parseInt(tlFields.interval.val(), 10) || 30,
                     max_videos: parseInt(tlFields.maxVideos.val(), 10) || 10,
                     save_persistent: tlFields.persistent.is(":checked"),
+                    camera_source: tlFields.cameraSource.val() || "follow",
                     light: tlFields.light.val() || null
                 }
             };
@@ -5360,6 +5754,12 @@ $(function () {
     let _filamentAllProfiles = [];
     let _filamentSwapToken = null;
     let _filamentSwapPollHandle = null;
+    let _filamentServiceTemps = {
+        nozzleCurrent: null,
+        nozzleTarget: null,
+        bedCurrent: null,
+        bedTarget: null,
+    };
     let _filamentSwapSettings = {
         allow_legacy_swap: false,
         manual_swap_preheat_temp_c: 140,
@@ -5372,6 +5772,33 @@ $(function () {
         const id = parseInt(profileId, 10);
         if (!Number.isFinite(id)) return null;
         return _filamentAllProfiles.find(p => parseInt(p.id, 10) === id) || null;
+    }
+
+    function renderFilamentServiceTemps() {
+        const nozzleCurrentEl = document.getElementById("filament-service-nozzle-current");
+        const nozzleTargetEl = document.getElementById("filament-service-nozzle-target");
+        const bedCurrentEl = document.getElementById("filament-service-bed-current");
+        const bedTargetEl = document.getElementById("filament-service-bed-target");
+        if (!nozzleCurrentEl || !nozzleTargetEl || !bedCurrentEl || !bedTargetEl) {
+            return;
+        }
+        nozzleCurrentEl.textContent = formatServiceTempValue(_filamentServiceTemps.nozzleCurrent);
+        nozzleTargetEl.textContent = `Target: ${formatServiceTempValue(_filamentServiceTemps.nozzleTarget)}`;
+        bedCurrentEl.textContent = formatServiceTempValue(_filamentServiceTemps.bedCurrent);
+        bedTargetEl.textContent = `Target: ${formatServiceTempValue(_filamentServiceTemps.bedTarget)}`;
+    }
+
+    function updateFilamentServiceTemps(partial = {}) {
+        if (!partial || typeof partial !== "object") {
+            return;
+        }
+        const keys = ["nozzleCurrent", "nozzleTarget", "bedCurrent", "bedTarget"];
+        keys.forEach((key) => {
+            if (Object.prototype.hasOwnProperty.call(partial, key)) {
+                _filamentServiceTemps[key] = partial[key];
+            }
+        });
+        renderFilamentServiceTemps();
     }
 
     function filamentServiceTemp(profile) {
@@ -5542,7 +5969,7 @@ $(function () {
 
     async function filamentRefreshSwapState() {
         try {
-            const data = await filamentJsonRequest("/api/filaments/service/swap", {}, "Failed to load swap state");
+            const data = await filamentJsonRequest(withActivePrinterQuery("/api/filaments/service/swap"), {}, "Failed to load swap state");
             filamentUpdateSwapState(data);
         } catch (err) {
             console.warn("Filament swap state refresh failed:", err);
@@ -5553,7 +5980,7 @@ $(function () {
     }
 
     async function filamentServiceRequest(url, payload) {
-        return filamentJsonRequest(url, {
+        return filamentJsonRequest(withActivePrinterQuery(url), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload || {}),
@@ -5628,7 +6055,7 @@ $(function () {
                         const bed    = p.bed_temp_first_layer ?? p.bed_temp_other_layer ?? p.bed_temp ?? "?";
                         if (!confirm(`Preheat printer for ${p.name}?\nNozzle: ${nozzle}°C, Bed: ${bed}°C`)) return;
                         try {
-                            await filamentJsonRequest(`/api/filaments/${safeId}/apply`, { method: "POST" }, "Failed to preheat filament profile");
+                            await filamentJsonRequest(withActivePrinterQuery(`/api/filaments/${safeId}/apply`), { method: "POST" }, "Failed to preheat filament profile");
                             filamentSetServiceStatus(`Preheating ${p.name}: nozzle ${nozzle}\u00B0C, bed ${bed}\u00B0C.`, "warning");
                         } catch (err) {
                             filamentSetServiceStatus(`Preheat failed: ${err.message}`, "danger");

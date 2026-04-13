@@ -635,10 +635,11 @@ def test_snapshot_timeout_requests_video_recovery(monkeypatch, tmp_path):
 
 def test_timelapse_external_camera_snapshot_skips_printer_video_wait(monkeypatch, tmp_path):
     cfg = FakeConfigManager(tmp_path)
+    cfg._cfg.timelapse["camera_source"] = "external"
     cfg._cfg.camera = {
         "per_printer": {
             "SN1": {
-                "source": "external",
+                "source": "printer",
                 "external": {
                     "name": "Workbench Cam",
                     "snapshot_url": "http://cam.local/snapshot.jpg",
@@ -682,6 +683,67 @@ def test_timelapse_external_camera_snapshot_skips_printer_video_wait(monkeypatch
         web.app.config["api_key"] = old_api_key
 
     assert len(captures) == 1
+    assert captures[0]["camera_settings"]["source"] == "external"
+    assert cfg._cfg.camera["per_printer"]["SN1"]["source"] == "printer"
+
+
+def test_timelapse_external_camera_snapshot_uses_printer_light(monkeypatch, tmp_path):
+    cfg = FakeConfigManager(tmp_path)
+    cfg._cfg.timelapse["camera_source"] = "external"
+    cfg._cfg.camera = {
+        "per_printer": {
+            "SN1": {
+                "source": "printer",
+                "external": {
+                    "name": "Workbench Cam",
+                    "snapshot_url": "http://cam.local/snapshot.jpg",
+                    "stream_url": "",
+                    "refresh_sec": 2,
+                },
+            }
+        }
+    }
+    svc = TimelapseService(cfg, captures_dir=tmp_path)
+    svc._light_mode = "snapshot"
+    svc._current_dir = str(tmp_path / "capture")
+    svc._current_filename = "cube.gcode"
+    svc._frame_count = 0
+    os.makedirs(svc._current_dir, exist_ok=True)
+
+    captures = []
+    light_calls = []
+    old_svc = web.app.svc
+    old_api_key = web.app.config.get("api_key")
+    web.app.svc = SimpleNamespace(svcs={"videoqueue": SimpleNamespace(saved_light_state=False)})
+    web.app.config["api_key"] = "secret-key"
+
+    def fail_if_called(self):
+        raise AssertionError("_await_video_frame should not be called for external cameras")
+
+    def fake_capture(camera_settings, ffmpeg_path, frame_path, **kwargs):
+        captures.append({
+            "camera_settings": camera_settings,
+            "ffmpeg_path": ffmpeg_path,
+            **kwargs,
+        })
+        with open(frame_path, "wb") as fh:
+            fh.write(b"jpg")
+
+    try:
+        monkeypatch.setattr("web.service.timelapse._resolve_ffmpeg_path", lambda: "resolved-ffmpeg")
+        monkeypatch.setattr(TimelapseService, "_await_video_frame", fail_if_called)
+        monkeypatch.setattr("web.camera.capture_camera_snapshot_to_file", fake_capture)
+        monkeypatch.setattr("web.set_printer_light_state", lambda state, printer_index=None: light_calls.append(state) or True)
+        monkeypatch.setattr("web.service.timelapse.time.sleep", lambda seconds: None)
+        svc._take_snapshot()
+    finally:
+        web.app.svc = old_svc
+        web.app.config["api_key"] = old_api_key
+
+    assert len(captures) == 1
+    assert captures[0]["for_timelapse"] is False
+    assert captures[0]["camera_settings"]["effective_source"] == "external"
+    assert light_calls == [True, False]
 
 
 def test_timelapse_service_uses_per_printer_settings_when_present(tmp_path):
@@ -693,6 +755,7 @@ def test_timelapse_service_uses_per_printer_settings_when_present(tmp_path):
         "max_videos": 2,
         "save_persistent": True,
         "light": None,
+        "camera_source": "follow",
         "per_printer": {
             "SN2": {
                 "enabled": True,
@@ -700,6 +763,7 @@ def test_timelapse_service_uses_per_printer_settings_when_present(tmp_path):
                 "max_videos": 4,
                 "save_persistent": False,
                 "light": "snapshot",
+                "camera_source": "external",
             }
         },
     }
@@ -712,12 +776,14 @@ def test_timelapse_service_uses_per_printer_settings_when_present(tmp_path):
     assert svc0._max_videos == 2
     assert svc0._save_persistent is True
     assert svc0._light_mode is None
+    assert svc0._camera_source == "follow"
 
     assert svc1.enabled is True
     assert svc1._interval == 11
     assert svc1._max_videos == 4
     assert svc1._save_persistent is False
     assert svc1._light_mode == "snapshot"
+    assert svc1._camera_source == "external"
 
 
 def test_timelapse_runtime_state_reports_recovery(tmp_path):

@@ -56,6 +56,7 @@ def default_timelapse_config():
             os.path.join(str(PlatformDirs("ankerctl").user_config_path), "captures"),
         ),
         "light": os.getenv("TIMELAPSE_LIGHT", None),
+        "camera_source": os.getenv("TIMELAPSE_CAMERA_SOURCE", "follow"),
     }
 
 

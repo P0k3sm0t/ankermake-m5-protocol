@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from cli.model import Account, Config, Printer
 from web import app
+from web.camera import CameraCaptureError
 from web.service.history import PrintHistory
 
 
@@ -63,6 +64,21 @@ def _base_config():
         ),
         printers=[_printer()],
     )
+
+
+class FakeHistoryList:
+    def __init__(self, label):
+        self.label = label
+
+    def get_history(self, limit=50, offset=0):
+        return [{
+            "id": 1,
+            "filename": self.label,
+            "thumbnail_available": False,
+        }]
+
+    def get_count(self):
+        return 1
 
 
 def _install_app_state(*, mqtt=None, videoqueue=None, filetransfer=None, config=None, login=True, video_supported=True, unsupported=False):
@@ -196,8 +212,8 @@ def test_printer_storage_file_list_route_returns_files_and_validates_input(monke
     old_values, old_svc = _install_app_state(mqtt=SimpleNamespace())
     calls = []
 
-    def fake_probe(source="onboard", source_value=None, timeout=5.0, collect_window=1.0):
-        calls.append((source, source_value, timeout, collect_window))
+    def fake_probe(source="onboard", source_value=None, timeout=5.0, collect_window=1.0, printer_index=None):
+        calls.append((source, source_value, timeout, collect_window, printer_index))
         files = [{
             "name": "cube.gcode" if source == "onboard" else "usb-part.gcode",
             "path": "/usr/data/local/model/cube.gcode" if source == "onboard" else "/tmp/udisk/udisk1/usb-part.gcode",
@@ -231,8 +247,8 @@ def test_printer_storage_file_list_route_returns_files_and_validates_input(monke
     assert bad_value.status_code == 400
     assert bad_source.status_code == 400
     assert calls == [
-        ("onboard", None, 5.0, 1.0),
-        ("usb", None, 5.0, 1.0),
+        ("onboard", None, 5.0, 1.0, 0),
+        ("usb", None, 5.0, 1.0, 0),
     ]
 
 
@@ -271,7 +287,7 @@ def test_printer_storage_file_list_route_surfaces_probe_errors(monkeypatch):
     old_values, old_svc = _install_app_state(mqtt=SimpleNamespace())
     monkeypatch.setattr(
         "web._probe_printer_storage_files",
-        lambda source="onboard", source_value=None, timeout=5.0, collect_window=1.0: (
+        lambda source="onboard", source_value=None, timeout=5.0, collect_window=1.0, printer_index=None: (
             None,
             ({"error": "No response from printer for storage source 'usb'"}, 504),
         ),
@@ -441,6 +457,40 @@ def test_history_routes_require_auth_and_clear_entries():
     assert calls == [("get", 500, 0), ("clear",)]
 
 
+def test_history_route_uses_requested_or_active_indexed_mqtt_service():
+    cfg = _base_config()
+    cfg.printers = [
+        _printer(sn="SN0", name="Thing 1"),
+        _printer(sn="SN1", name="Thing 2"),
+    ]
+    legacy = SimpleNamespace(history=FakeHistoryList("legacy.gcode"))
+    printer0 = SimpleNamespace(history=FakeHistoryList("thing1.gcode"))
+    printer1 = SimpleNamespace(history=FakeHistoryList("thing2.gcode"))
+    services = FakeServices()
+    services._services = {
+        "mqttqueue": legacy,
+        "mqttqueue:0": printer0,
+        "mqttqueue:1": printer1,
+    }
+    services.svcs = dict(services._services)
+
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(config=cfg)
+    app.config["printer_index"] = 1
+    app.svc = services
+
+    try:
+        active = client.get("/api/history", headers={"X-Api-Key": API_KEY})
+        requested = client.get("/api/history?printer_index=0", headers={"X-Api-Key": API_KEY})
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert active.status_code == 200
+    assert active.get_json()["entries"][0]["filename"] == "thing2.gcode"
+    assert requested.status_code == 200
+    assert requested.get_json()["entries"][0]["filename"] == "thing1.gcode"
+
+
 def test_history_delete_selected_route_deletes_finished_entries(tmp_path):
     history = PrintHistory(db_path=tmp_path / "history.db")
     first_id = history.record_start("one.gcode")
@@ -514,7 +564,9 @@ def test_history_thumbnail_route_serves_local_archive_thumbnail(tmp_path):
         _restore_app_state(old_values, old_svc)
 
     assert history_resp.status_code == 200
-    assert history_resp.get_json()["entries"][0]["thumbnail_url"].endswith(f"/api/history/{entry_id}/thumbnail")
+    thumbnail_url = history_resp.get_json()["entries"][0]["thumbnail_url"]
+    assert thumbnail_url.startswith(f"/api/history/{entry_id}/thumbnail")
+    assert "printer_index=0" in thumbnail_url
     assert thumb_resp.status_code == 200
     assert thumb_resp.mimetype == "image/png"
     assert thumb_resp.data.startswith(b"\x89PNG")
@@ -906,7 +958,7 @@ def test_snapshot_route_reports_expected_error_paths(monkeypatch):
     assert "Command" not in timeout.get_json()["error"]
 
 
-def test_snapshot_and_camera_frame_routes_support_external_camera(monkeypatch, tmp_path):
+def test_snapshot_and_camera_frame_routes_support_external_camera(monkeypatch):
     cfg = _base_config()
     cfg.camera = {
         "per_printer": {
@@ -954,6 +1006,43 @@ def test_snapshot_and_camera_frame_routes_support_external_camera(monkeypatch, t
     assert len(captures) == 2
     assert all(call["camera_settings"]["effective_source"] == "external" for call in captures)
     assert all(call["ffmpeg_path"] == "/usr/bin/ffmpeg" for call in captures)
+
+
+def test_camera_frame_route_reports_external_capture_errors_as_bad_gateway(monkeypatch):
+    cfg = _base_config()
+    cfg.camera = {
+        "per_printer": {
+            "SN1": {
+                "source": "external",
+                "external": {
+                    "name": "Workbench Cam",
+                    "snapshot_url": "",
+                    "stream_url": "rtsp://cam.local/live",
+                    "refresh_sec": 2,
+                },
+            }
+        }
+    }
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(
+        config=cfg,
+        video_supported=False,
+        videoqueue=None,
+    )
+
+    monkeypatch.setattr("web._ffmpeg_path", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(
+        "web.camera.capture_camera_snapshot_to_file",
+        lambda *args, **kwargs: (_ for _ in ()).throw(CameraCaptureError("RTSP preview failed")),
+    )
+
+    try:
+        frame = client.get("/api/camera/frame", headers={"X-Api-Key": API_KEY})
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert frame.status_code == 502
+    assert frame.get_json()["error"] == "RTSP preview failed"
 
 
 def test_snapshot_route_saves_manual_snapshot_into_timelapse_gallery(monkeypatch):

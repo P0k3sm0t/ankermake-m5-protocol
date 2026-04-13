@@ -10,6 +10,7 @@ CAMERA_SOURCE_PRINTER = "printer"
 CAMERA_SOURCE_EXTERNAL = "external"
 DEFAULT_EXTERNAL_REFRESH_SEC = 3
 PRINTERS_WITHOUT_CAMERA = {"V8110"}
+RTSP_LOW_LATENCY_INPUT_ARGS = ["-fflags", "nobuffer", "-probesize", "32768", "-analyzeduration", "0"]
 
 
 class CameraCaptureError(RuntimeError):
@@ -35,10 +36,11 @@ def printer_supports_camera(printer_or_model):
     return str(model) not in PRINTERS_WITHOUT_CAMERA
 
 
-def _normalize_source(value):
-    source = str(value or CAMERA_SOURCE_PRINTER).strip().lower()
+def _normalize_source(value, default=CAMERA_SOURCE_PRINTER):
+    fallback = default if default in {CAMERA_SOURCE_PRINTER, CAMERA_SOURCE_EXTERNAL} else CAMERA_SOURCE_PRINTER
+    source = str(value or fallback).strip().lower()
     if source not in {CAMERA_SOURCE_PRINTER, CAMERA_SOURCE_EXTERNAL}:
-        return CAMERA_SOURCE_PRINTER
+        return fallback
     return source
 
 
@@ -67,7 +69,7 @@ def _printer_from_config(cfg, printer_index):
     return printers[printer_index]
 
 
-def resolve_camera_settings(cfg, printer_index=0):
+def resolve_camera_settings(cfg, printer_index=0, source_override=None):
     printer = _printer_from_config(cfg, printer_index)
     printer_name = getattr(printer, "name", None)
     printer_sn = getattr(printer, "sn", None)
@@ -80,7 +82,10 @@ def resolve_camera_settings(cfg, printer_index=0):
 
     raw_entry = per_printer.get(printer_sn, {}) if printer_sn else {}
     entry = cli.model.merge_dict_defaults(raw_entry, default_camera_settings())
-    source = _normalize_source(entry.get("source"))
+    configured_source = _normalize_source(entry.get("source"))
+    source = configured_source
+    if source_override is not None:
+        source = _normalize_source(source_override, default=configured_source)
     external = normalize_external_camera_settings(entry.get("external"))
     external_configured = bool(external["stream_url"] or external["snapshot_url"])
 
@@ -99,7 +104,7 @@ def resolve_camera_settings(cfg, printer_index=0):
     elif not printer_supported and not external_configured:
         detail = "This printer does not expose a built-in camera. Configure an external feed in Setup -> Camera."
     elif effective_source == CAMERA_SOURCE_EXTERNAL:
-        detail = f"Using external camera preview (refreshes every {external['refresh_sec']}s)."
+        detail = "Using external camera live stream." if external["stream_url"] else "Using external camera snapshot preview."
     else:
         detail = "No camera source is ready yet."
 
@@ -108,6 +113,7 @@ def resolve_camera_settings(cfg, printer_index=0):
         "printer_name": printer_name,
         "printer_sn": printer_sn,
         "source": source,
+        "configured_source": configured_source,
         "effective_source": effective_source,
         "printer_supported": printer_supported,
         "feature_available": bool(printer_supported or external_configured),
@@ -152,6 +158,7 @@ def update_camera_settings(cfg, printer_index, payload):
 
 def runtime_camera_state(camera_settings):
     external = camera_settings.get("external") or {}
+    stream_url = str(external.get("stream_url") or "")
     return {
         "source": camera_settings.get("source"),
         "effective_source": camera_settings.get("effective_source"),
@@ -161,6 +168,7 @@ def runtime_camera_state(camera_settings):
         "external_name": external.get("name") or None,
         "external_configured": bool(external.get("configured")),
         "external_refresh_sec": external.get("refresh_sec") or DEFAULT_EXTERNAL_REFRESH_SEC,
+        "external_stream_preview": bool(stream_url),
     }
 
 
@@ -234,6 +242,98 @@ def _external_input_url(camera_settings):
     return external.get("snapshot_url") or external.get("stream_url") or ""
 
 
+def external_stream_url(camera_settings):
+    external = (camera_settings or {}).get("external") or {}
+    return str(external.get("stream_url") or "").strip()
+
+
+def _rtsp_snapshot_input_arg_attempts():
+    return [
+        ["-rtsp_transport", "tcp", *RTSP_LOW_LATENCY_INPUT_ARGS],
+        [*RTSP_LOW_LATENCY_INPUT_ARGS],
+    ]
+
+
+def _mjpeg_filter(scale):
+    filters = []
+    scale_filter = _scale_filter(scale)
+    if scale_filter:
+        filters.append(scale_filter)
+    return ",".join(filters) if filters else None
+
+
+def open_external_mjpeg_stream(ffmpeg_path, input_url, *, scale=None):
+    input_url = str(input_url or "").strip()
+    if not input_url:
+        raise CameraCaptureError("External camera live preview requires a stream URL.")
+
+    cmd = [
+        ffmpeg_path,
+        "-loglevel",
+        "error",
+        "-nostdin",
+    ]
+    if input_url.lower().startswith("rtsp://"):
+        cmd.extend(["-rtsp_transport", "tcp", *RTSP_LOW_LATENCY_INPUT_ARGS])
+    cmd.extend(["-i", input_url, "-an", "-sn", "-dn"])
+    vf = _mjpeg_filter(scale)
+    if vf:
+        cmd.extend(["-vf", vf])
+    cmd.extend(["-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "5", "pipe:1"])
+
+    try:
+        return subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        raise CameraCaptureError(f"External camera stream could not start ffmpeg: {exc}") from exc
+
+
+def iter_mjpeg_frames(proc, *, chunk_size=8192, max_buffer=4 * 1024 * 1024):
+    stdout = getattr(proc, "stdout", None)
+    if stdout is None:
+        return
+
+    buffer = bytearray()
+    while True:
+        chunk = stdout.read(chunk_size)
+        if not chunk:
+            break
+        buffer.extend(chunk)
+
+        while True:
+            start = buffer.find(b"\xff\xd8")
+            if start < 0:
+                if len(buffer) > max_buffer:
+                    del buffer[:-2]
+                break
+            end = buffer.find(b"\xff\xd9", start + 2)
+            if end < 0:
+                if start > 0:
+                    del buffer[:start]
+                break
+            frame = bytes(buffer[start:end + 2])
+            del buffer[:end + 2]
+            yield frame
+
+
+def stop_external_mjpeg_stream(proc):
+    if not proc:
+        return
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+    except OSError:
+        pass
+
+
 def capture_camera_snapshot_to_file(
     camera_settings,
     ffmpeg_path,
@@ -269,18 +369,23 @@ def capture_camera_snapshot_to_file(
         input_url = _external_input_url(camera_settings)
         if not input_url:
             raise CameraCaptureError("External camera is selected, but no stream or snapshot URL is configured.")
-        input_args = []
-        if input_url.lower().startswith("rtsp://"):
-            input_args.extend(["-rtsp_transport", "tcp"])
-        _run_ffmpeg_snapshot(
-            ffmpeg_path,
-            input_url,
-            output_path,
-            timeout=timeout,
-            input_args=input_args,
-            scale=scale,
-        )
-        return
+        rtsp_url = input_url.lower().startswith("rtsp://")
+        attempt_input_args = _rtsp_snapshot_input_arg_attempts() if rtsp_url else [[]]
+        last_error = None
+        for input_args in attempt_input_args:
+            try:
+                _run_ffmpeg_snapshot(
+                    ffmpeg_path,
+                    input_url,
+                    output_path,
+                    timeout=timeout,
+                    input_args=input_args,
+                    scale=scale,
+                )
+                return
+            except CameraCaptureError as exc:
+                last_error = exc
+        raise last_error or CameraCaptureError("Snapshot capture failed")
 
     source = (camera_settings or {}).get("source")
     if source == CAMERA_SOURCE_EXTERNAL:
