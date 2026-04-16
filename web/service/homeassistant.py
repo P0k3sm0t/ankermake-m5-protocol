@@ -491,16 +491,19 @@ class HomeAssistantService:
         topic = f"{self._discovery_prefix}/switch/{self._node_id}/light/config"
         self._publish(topic, json.dumps(light_config), retain=True)
 
-        # Camera entity (MJPEG stream)
+        # Camera entity — use url_template pointing at /api/snapshot for HA MQTT camera
         flask_host = os.getenv("FLASK_HOST") or "127.0.0.1"
         if flask_host in ("0.0.0.0", "::"):
             flask_host = "127.0.0.1"
         flask_port = os.getenv("FLASK_PORT") or "4470"
+        snapshot_url = f"http://{flask_host}:{flask_port}/api/snapshot"
+        stream_url = f"http://{flask_host}:{flask_port}/api/camera/stream"
         camera_config = {
             "name": "Camera",
             "unique_id": f"{self._node_id}_camera",
             "object_id": f"{self._node_id}_camera",
             "topic": f"{self._topic_prefix}/{self._printer_sn}/camera",
+            "url_template": snapshot_url,
             "device": device,
             "availability": availability,
             "icon": "mdi:camera",
@@ -508,5 +511,7 @@ class HomeAssistantService:
         topic = f"{self._discovery_prefix}/camera/{self._node_id}/camera/config"
         self._publish(topic, json.dumps(camera_config), retain=True)
 
+        log.info(f"HA camera stream available at: {stream_url}")
+        log.info(f"HA camera snapshot available at: {snapshot_url}")
         log.info(f"HA MQTT: published discovery configs ({len(sensors)} sensors, "
                  f"{len(binary_sensors)} binary sensors, 1 switch, 1 camera)")

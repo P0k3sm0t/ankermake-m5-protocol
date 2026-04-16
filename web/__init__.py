@@ -4201,27 +4201,63 @@ def app_api_camera_frame():
 
 @app.get("/api/camera/stream")
 def app_api_camera_stream():
-    """Return a persistent MJPEG preview stream for RTSP external cameras."""
+    """Return a persistent MJPEG preview stream for both printer and external cameras."""
     printer_index = _requested_printer_index()
     camera_settings = _resolve_camera_settings(printer_index=printer_index)
-    if camera_settings.get("effective_source") != web.camera.CAMERA_SOURCE_EXTERNAL:
-        return {"error": "External camera is not the active camera source."}, 400
+    effective_source = camera_settings.get("effective_source")
 
-    stream_url = web.camera.external_stream_url(camera_settings)
-    if not stream_url:
-        return {"error": "External camera has no stream URL configured."}, 400
-    ffmpeg_path = _ffmpeg_path()
-    if not ffmpeg_path:
-        return {"error": "ffmpeg not installed"}, 500
-
+    fps_raw = request.args.get("fps", None)
+    quality_raw = request.args.get("quality", "5")
     try:
-        proc = web.camera.open_external_mjpeg_stream(
-            ffmpeg_path,
-            stream_url,
-            scale=(1280, 720),
-        )
-    except web.camera.CameraCaptureError as exc:
-        return {"error": str(exc)}, 502
+        fps = int(fps_raw) if fps_raw is not None else None
+        quality = max(1, min(31, int(quality_raw)))
+    except (TypeError, ValueError):
+        fps = None
+        quality = 5
+
+    if effective_source == web.camera.CAMERA_SOURCE_PRINTER:
+        ffmpeg_path = _ffmpeg_path()
+        if not ffmpeg_path:
+            return {"error": "ffmpeg not installed"}, 500
+
+        # Build internal URL to the raw H.264 stream
+        flask_host = "127.0.0.1"
+        flask_port = request.environ.get("SERVER_PORT") or os.getenv("FLASK_PORT", "4470")
+        video_url = f"http://{flask_host}:{flask_port}/video?for_timelapse=1&printer_index={printer_index}"
+        # Pass API key when one is configured (the /video endpoint enforces it)
+        api_key = app.config.get("api_key")
+        if api_key:
+            video_url += f"&apikey={api_key}"
+
+        try:
+            proc = web.camera.open_printer_mjpeg_stream(
+                ffmpeg_path,
+                video_url,
+                fps=fps or 5,
+                scale=(1280, 720),
+                quality=quality,
+            )
+        except web.camera.CameraCaptureError as exc:
+            return {"error": str(exc)}, 502
+
+    elif effective_source == web.camera.CAMERA_SOURCE_EXTERNAL:
+        stream_url = web.camera.external_stream_url(camera_settings)
+        if not stream_url:
+            return {"error": "External camera has no stream URL configured."}, 400
+        ffmpeg_path = _ffmpeg_path()
+        if not ffmpeg_path:
+            return {"error": "ffmpeg not installed"}, 500
+        try:
+            proc = web.camera.open_external_mjpeg_stream(
+                ffmpeg_path,
+                stream_url,
+                scale=(1280, 720),
+            )
+        except web.camera.CameraCaptureError as exc:
+            return {"error": str(exc)}, 502
+
+    else:
+        return {"error": "No camera source is currently active."}, 400
 
     boundary = b"frame"
 

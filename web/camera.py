@@ -318,6 +318,29 @@ def open_external_mjpeg_stream(ffmpeg_path, input_url, *, scale=None):
         raise CameraCaptureError(f"External camera stream could not start ffmpeg: {exc}") from exc
 
 
+def open_printer_mjpeg_stream(ffmpeg_path, video_url, *, fps=5, scale=None, quality=5):
+    """Open an MJPEG stream by transcoding the printer's raw H.264 /video endpoint."""
+    cmd = [
+        ffmpeg_path, "-loglevel", "error", "-nostdin",
+        "-f", "h264", "-i", video_url,
+        "-an", "-sn", "-dn",
+        "-r", str(fps),
+    ]
+    vf = _mjpeg_filter(scale)
+    if vf:
+        cmd.extend(["-vf", vf])
+    cmd.extend(["-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", str(quality), "pipe:1"])
+    try:
+        return subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        raise CameraCaptureError(f"Printer MJPEG stream could not start ffmpeg: {exc}") from exc
+
+
 def iter_mjpeg_frames(proc, *, chunk_size=8192, max_buffer=4 * 1024 * 1024, stale_timeout=_MJPEG_STALE_READ_TIMEOUT_SEC):
     stdout = getattr(proc, "stdout", None)
     if stdout is None:
