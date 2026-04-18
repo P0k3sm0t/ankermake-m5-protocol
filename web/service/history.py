@@ -564,18 +564,21 @@ class PrintHistory:
     def get_history(self, limit=50, offset=0, printer_index=None):
         """Return recent print history as list of dicts.
 
-        Pass printer_index to restrict to one printer; None returns all.
+        Pass printer_index to restrict to one printer while still including
+        legacy rows that predate the printer_index column. None returns all.
         """
         params = []
         where = ""
+        order_by = " ORDER BY id DESC"
         if printer_index is not None:
-            where = " WHERE printer_index=?"
+            where = " WHERE printer_index=? OR printer_index IS NULL"
             params.append(int(printer_index))
+            order_by = " ORDER BY CASE WHEN printer_index IS NULL THEN 1 ELSE 0 END, id DESC"
         params.extend([limit, offset])
         with self._lock:
             with self._connect() as conn:
                 rows = conn.execute(
-                    f"SELECT * FROM print_history{where} ORDER BY id DESC LIMIT ? OFFSET ?",
+                    f"SELECT * FROM print_history{where}{order_by} LIMIT ? OFFSET ?",
                     params,
                 ).fetchall()
                 return [self._decorate_entry(r, conn=conn) for r in rows]
@@ -635,10 +638,14 @@ class PrintHistory:
         return self.get_history(limit=limit, offset=offset)
 
     def get_count(self, printer_index=None):
-        """Return total number of entries. Pass printer_index to filter by printer."""
+        """Return total number of entries.
+
+        Pass printer_index to filter by printer while still counting legacy
+        rows that have no printer_index.
+        """
         where, params = "", ()
         if printer_index is not None:
-            where = " WHERE printer_index=?"
+            where = " WHERE printer_index=? OR printer_index IS NULL"
             params = (int(printer_index),)
         with self._lock:
             with self._connect() as conn:
@@ -695,12 +702,50 @@ class PrintHistory:
                     log.info("History: deleted %d selected entr%s", deleted, "y" if deleted == 1 else "ies")
                 return deleted
 
-    def clear(self):
-        """Delete all history entries."""
+    def clear(self, printer_index=None):
+        """Delete history entries.
+
+        When printer_index is provided, only rows for that printer are removed.
+        Legacy rows with NULL printer_index are preserved.
+        """
         with self._lock:
             with self._connect() as conn:
-                conn.execute("DELETE FROM print_history")
-                conn.commit()
-                log.info("Print history cleared")
-        if self._archive_dir and os.path.isdir(self._archive_dir):
+                if printer_index is None:
+                    conn.execute("DELETE FROM print_history")
+                    conn.commit()
+                    log.info("Print history cleared")
+                    delete_archive_dir = True
+                else:
+                    scoped_index = int(printer_index)
+                    archive_relpaths = [
+                        row[0]
+                        for row in conn.execute(
+                            "SELECT DISTINCT archive_relpath FROM print_history "
+                            "WHERE printer_index=? AND archive_relpath IS NOT NULL AND archive_relpath != ''",
+                            (scoped_index,),
+                        ).fetchall()
+                        if row[0]
+                    ]
+                    conn.execute(
+                        "DELETE FROM print_history WHERE printer_index=?",
+                        (scoped_index,),
+                    )
+                    if archive_relpaths:
+                        still_referenced = {
+                            row[0]
+                            for row in conn.execute(
+                                "SELECT DISTINCT archive_relpath FROM print_history "
+                                f"WHERE archive_relpath IN ({','.join('?' for _ in archive_relpaths)})",
+                                tuple(archive_relpaths),
+                            ).fetchall()
+                            if row[0]
+                        }
+                        self._delete_archive_relpaths(
+                            [relpath for relpath in archive_relpaths if relpath not in still_referenced]
+                        )
+                    self._delete_unreferenced_archives(conn)
+                    conn.commit()
+                    log.info("Print history cleared for printer %d", scoped_index)
+                    delete_archive_dir = False
+        if delete_archive_dir and self._archive_dir and os.path.isdir(self._archive_dir):
             shutil.rmtree(self._archive_dir, ignore_errors=True)

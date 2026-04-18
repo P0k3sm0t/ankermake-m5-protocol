@@ -4427,13 +4427,16 @@ def app_api_history():
     filter_arg = (request.args.get("filter") or "active").lower()
     if filter_arg == "all":
         history_filter = None
+        selected_history_printer_index = None
     elif filter_arg == "active":
         history_filter = printer_index
+        selected_history_printer_index = printer_index
     else:
         try:
-            history_filter = int(filter_arg)
+            selected_history_printer_index = int(filter_arg)
         except (TypeError, ValueError):
-            history_filter = printer_index
+            selected_history_printer_index = printer_index
+        history_filter = selected_history_printer_index
 
     # Build a name lookup from config so each entry carries a printer_name.
     printer_names = {}
@@ -4457,8 +4460,15 @@ def app_api_history():
     serialized_entries = []
     for entry in entries:
         item = dict(entry)
+        thumbnail_printer_index = item.get("printer_index")
+        if thumbnail_printer_index is None:
+            thumbnail_printer_index = selected_history_printer_index if history_filter is not None else printer_index
         item["thumbnail_url"] = (
-            url_for("app_api_history_thumbnail", entry_id=item["id"], printer_index=printer_index)
+            url_for(
+                "app_api_history_thumbnail",
+                entry_id=item["id"],
+                printer_index=thumbnail_printer_index,
+            )
             if item.get("thumbnail_available")
             else None
         )
@@ -4473,10 +4483,20 @@ def app_api_history():
 
 @app.delete("/api/history")
 def app_api_history_clear():
-    """Clear all print history."""
-    printer_index = _requested_printer_index()
-    with borrow_mqtt(printer_index) as mqtt:
-        mqtt.history.clear()
+    """Clear print history within the current history filter scope."""
+    requested_printer_index = _requested_printer_index()
+    filter_arg = (request.args.get("filter") or "active").lower()
+    if filter_arg == "all":
+        clear_printer_index = None
+    elif filter_arg == "active":
+        clear_printer_index = requested_printer_index
+    else:
+        try:
+            clear_printer_index = int(filter_arg)
+        except (TypeError, ValueError):
+            clear_printer_index = requested_printer_index
+    with borrow_mqtt(requested_printer_index) as mqtt:
+        mqtt.history.clear(printer_index=clear_printer_index)
     return {"status": "ok"}
 
 
