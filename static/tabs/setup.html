@@ -409,6 +409,27 @@
                                                     </button>
                                                 </div>
                                             </div>
+                                            <div id="camera-source-urls-wrap" class="d-none border-top pt-3 vstack gap-2">
+                                                <div class="form-text mb-1">Both a printer camera and an external camera are configured — use these source-specific URLs to access each independently (e.g. in Frigate):</div>
+                                                <div>
+                                                    <label class="form-label small mb-1" for="camera-integration-printer-stream-url">Printer camera <span class="text-muted">(built-in)</span></label>
+                                                    <div class="input-group input-group-sm">
+                                                        <input class="form-control font-monospace" type="text" id="camera-integration-printer-stream-url" readonly>
+                                                        <button class="btn btn-outline-secondary" type="button" id="camera-integration-copy-printer-stream" title="Copy printer stream URL">
+                                                            <i class="bi bi-clipboard"></i>
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                                <div>
+                                                    <label class="form-label small mb-1" for="camera-integration-external-stream-url">External camera</label>
+                                                    <div class="input-group input-group-sm">
+                                                        <input class="form-control font-monospace" type="text" id="camera-integration-external-stream-url" readonly>
+                                                        <button class="btn btn-outline-secondary" type="button" id="camera-integration-copy-external-stream" title="Copy external stream URL">
+                                                            <i class="bi bi-clipboard"></i>
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            </div>
                                             <div class="form-text" id="camera-integration-status"></div>
                                             <div>
                                                 <button class="btn btn-primary" type="button" id="camera-integration-save">Save Integration Stream</button>

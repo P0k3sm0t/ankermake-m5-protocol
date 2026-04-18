@@ -3289,6 +3289,12 @@ def _enrich_camera_integration(camera_config, printer_index):
         suffix += f"&apikey={api_key}"
     integration["stream_url"] = f"{base}/api/camera/stream{suffix}"
     integration["snapshot_url"] = f"{base}/api/snapshot{suffix}"
+    if camera_config.get("printer_supported") and camera_config.get("external_configured"):
+        integration["printer_stream_url"] = f"{base}/api/camera/stream{suffix}&source=printer"
+        integration["external_stream_url"] = f"{base}/api/camera/stream{suffix}&source=external"
+    else:
+        integration["printer_stream_url"] = None
+        integration["external_stream_url"] = None
     return {**camera_config, "integration": integration}
 
 
@@ -4266,12 +4272,18 @@ def app_api_camera_stream():
 
     fps_raw = request.args.get("fps", None)
     quality_raw = request.args.get("quality", "5")
+    source_param = request.args.get("source", "auto")
     try:
         fps = max(1, min(30, int(fps_raw))) if fps_raw is not None else None
         quality = max(1, min(31, int(quality_raw)))
     except (TypeError, ValueError):
         fps = None
         quality = 5
+
+    if source_param == web.camera.CAMERA_SOURCE_PRINTER:
+        effective_source = web.camera.CAMERA_SOURCE_PRINTER
+    elif source_param == web.camera.CAMERA_SOURCE_EXTERNAL:
+        effective_source = web.camera.CAMERA_SOURCE_EXTERNAL
 
     if effective_source == web.camera.CAMERA_SOURCE_PRINTER:
         ffmpeg_path = _ffmpeg_path()

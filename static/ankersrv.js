@@ -3259,6 +3259,11 @@ $(function () {
         $("#camera-integration-stream-url").val(integration.stream_url || "");
         $("#camera-integration-snapshot-url").val(integration.snapshot_url || "");
 
+        const hasBothSources = !!(integration.printer_stream_url && integration.external_stream_url);
+        $("#camera-source-urls-wrap").toggleClass("d-none", !hasBothSources);
+        $("#camera-integration-printer-stream-url").val(hasBothSources ? integration.printer_stream_url : "");
+        $("#camera-integration-external-stream-url").val(hasBothSources ? integration.external_stream_url : "");
+
         const statusEl = $("#camera-integration-status");
         if (statusEl.length) {
             let statusText = integration.enabled
@@ -3371,6 +3376,14 @@ $(function () {
 
     $("#camera-integration-copy-snapshot").on("click", function () {
         copyIntegrationUrl("camera-integration-snapshot-url", "Snapshot URL");
+    });
+
+    $("#camera-integration-copy-printer-stream").on("click", function () {
+        copyIntegrationUrl("camera-integration-printer-stream-url", "Printer Stream URL");
+    });
+
+    $("#camera-integration-copy-external-stream").on("click", function () {
+        copyIntegrationUrl("camera-integration-external-stream-url", "External Stream URL");
     });
 
     $("#camera-source-select").on("change", async function () {
