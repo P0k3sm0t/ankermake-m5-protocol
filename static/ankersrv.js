@@ -3235,6 +3235,25 @@ $(function () {
         $("#camera-external-name").val(camera && camera.external ? camera.external.name || "" : "");
         $("#camera-external-stream-url").val(camera && camera.external ? camera.external.stream_url || "" : "");
         $("#camera-external-snapshot-url").val(camera && camera.external ? camera.external.snapshot_url || "" : "");
+
+        const integration = camera && camera.integration ? camera.integration : {};
+        $("#camera-integration-enabled").prop("checked", !!integration.enabled);
+        $("#camera-integration-stream-url").val(integration.stream_url || "");
+        $("#camera-integration-snapshot-url").val(integration.snapshot_url || "");
+
+        const statusEl = $("#camera-integration-status");
+        if (statusEl.length) {
+            let statusText = integration.enabled
+                ? "Integration endpoint is enabled for this printer."
+                : "Integration endpoint is disabled for this printer.";
+            if (integration.ffmpeg_available === false) {
+                statusText += " Install ffmpeg to use the stream.";
+            }
+            if (integration.api_key_required) {
+                statusText += " API-key auth is active — the URLs above include your key.";
+            }
+            statusEl.text(statusText);
+        }
     }
 
     async function loadCameraSettings() {
@@ -3294,6 +3313,46 @@ $(function () {
         } finally {
             btn.prop("disabled", false);
         }
+    });
+
+    $("#camera-integration-save").on("click", async function () {
+        const btn = $(this);
+        btn.prop("disabled", true);
+        try {
+            await saveCameraSettings({
+                integration: {
+                    enabled: !!$("#camera-integration-enabled").prop("checked"),
+                },
+            }, "Integration stream settings saved");
+        } catch (err) {
+            flash_message(`Failed to save integration stream settings: ${err.message || err}`, "danger");
+        } finally {
+            btn.prop("disabled", false);
+        }
+    });
+
+    function copyIntegrationUrl(inputId, label) {
+        const url = $("#" + inputId).val().trim();
+        if (!url) {
+            flash_message("No URL to copy. Enable the integration stream and save first.", "warning");
+            return;
+        }
+        navigator.clipboard.writeText(url).then(
+            () => flash_message(`${label} copied to clipboard.`, "success"),
+            () => {
+                const el = document.getElementById(inputId);
+                if (el) { el.select(); document.execCommand("copy"); }
+                flash_message("URL selected — press Ctrl+C to copy.", "info");
+            }
+        );
+    }
+
+    $("#camera-integration-copy-stream").on("click", function () {
+        copyIntegrationUrl("camera-integration-stream-url", "Stream URL");
+    });
+
+    $("#camera-integration-copy-snapshot").on("click", function () {
+        copyIntegrationUrl("camera-integration-snapshot-url", "Snapshot URL");
     });
 
     $("#camera-source-select").on("change", async function () {

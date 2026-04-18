@@ -379,6 +379,67 @@
                                 </div>
                             </div>
                         </div>
+
+                        <!-- Integration Stream Card -->
+                        <div class="row g-3 mt-0">
+                            <div class="col-lg-7">
+                                <div class="card">
+                                    <div class="card-header fs-4">Printer Integration Stream</div>
+                                    <div class="card-body">
+                                        <div class="vstack gap-3">
+                                            <div class="form-check form-switch">
+                                                <input class="form-check-input" type="checkbox" id="camera-integration-enabled" role="switch">
+                                                <label class="form-check-label" for="camera-integration-enabled">Enable integration endpoint for this printer</label>
+                                            </div>
+                                            <div>
+                                                <label class="form-label" for="camera-integration-stream-url">Stream URL <span class="text-muted small">(MJPEG — Frigate, HA <code>stream_source</code>)</span></label>
+                                                <div class="input-group">
+                                                    <input class="form-control font-monospace small" type="text" id="camera-integration-stream-url" readonly placeholder="Save to generate URL">
+                                                    <button class="btn btn-outline-secondary" type="button" id="camera-integration-copy-stream" title="Copy stream URL">
+                                                        <i class="bi bi-clipboard"></i>
+                                                    </button>
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <label class="form-label" for="camera-integration-snapshot-url">Snapshot URL <span class="text-muted small">(JPEG — HA <code>still_image_url</code>)</span></label>
+                                                <div class="input-group">
+                                                    <input class="form-control font-monospace small" type="text" id="camera-integration-snapshot-url" readonly placeholder="Save to generate URL">
+                                                    <button class="btn btn-outline-secondary" type="button" id="camera-integration-copy-snapshot" title="Copy snapshot URL">
+                                                        <i class="bi bi-clipboard"></i>
+                                                    </button>
+                                                </div>
+                                            </div>
+                                            <div class="form-text" id="camera-integration-status"></div>
+                                            <div>
+                                                <button class="btn btn-primary" type="button" id="camera-integration-save">Save Integration Stream</button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-lg-5">
+                                <div class="card h-100">
+                                    <div class="card-header fs-4">Integration Notes</div>
+                                    <div class="card-body small">
+                                        <p class="mb-2">
+                                            The stream endpoint transcodes the printer camera to MJPEG via ffmpeg.
+                                        </p>
+                                        <p class="mb-1"><strong>Frigate</strong></p>
+                                        <pre class="border rounded p-2 small mb-3 text-body-secondary">cameras:
+  printer:
+    ffmpeg:
+      inputs:
+        - path: &lt;Stream URL&gt;</pre>
+                                        <p class="mb-1"><strong>Home Assistant generic camera</strong></p>
+                                        <pre class="border rounded p-2 small mb-3 text-body-secondary">still_image_url: &lt;Snapshot URL&gt;
+stream_source: &lt;Stream URL&gt;</pre>
+                                        <p class="mb-0">
+                                            When API-key auth is enabled, both URLs include your key automatically. Requires <code>ffmpeg</code>.
+                                        </p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
                     </div>
 
                     <!-- ===== TOOLS TAB ===== -->

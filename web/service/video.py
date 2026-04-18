@@ -98,6 +98,7 @@ class VideoQueue(Service):
             getattr(self, "video_enabled", False)
             or getattr(self, "timelapse_enabled", False)
             or getattr(self, "light_control_enabled", False)
+            or getattr(self, "_viewer_count", 0) > 0
         )
 
     def _sync_persistent_state(self):
