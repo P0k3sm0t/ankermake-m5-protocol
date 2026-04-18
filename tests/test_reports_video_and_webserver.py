@@ -282,6 +282,8 @@ def test_video_download_requires_auth_and_streams_when_enabled():
             self.state = RunState.Stopped
             self.start_calls = 0
             self.await_ready_calls = 0
+            self.viewer_connected_calls = 0
+            self.viewer_disconnected_calls = 0
 
         def start(self):
             self.start_calls += 1
@@ -289,6 +291,12 @@ def test_video_download_requires_auth_and_streams_when_enabled():
 
         def await_ready(self):
             self.await_ready_calls += 1
+
+        def viewer_connected(self):
+            self.viewer_connected_calls += 1
+
+        def viewer_disconnected(self):
+            self.viewer_disconnected_calls += 1
 
     videoqueue = FakeVideoQueue()
     client = app.test_client()
@@ -310,6 +318,8 @@ def test_video_download_requires_auth_and_streams_when_enabled():
     assert authorized.data == b"abcdef"
     assert videoqueue.start_calls == 1
     assert videoqueue.await_ready_calls == 1
+    assert videoqueue.viewer_connected_calls == 1
+    assert videoqueue.viewer_disconnected_calls == 1
 
 
 def test_webserver_bootstraps_secret_key_and_skips_services_for_unsupported_device(tmp_path, monkeypatch):

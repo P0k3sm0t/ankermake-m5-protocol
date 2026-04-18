@@ -829,19 +829,17 @@ def test_safe_same_site_redirect_target_rejects_external_style_paths():
 
 
 def test_apikey_url_param_redirects_and_sets_session():
-    """?apikey= should validate the key, strip itself from the URL, and
-    bootstrap the browser session auth used by the web UI."""
+    """?apikey= should authenticate API requests directly and bootstrap the session."""
     client = app.test_client()
     old_api_key = app.config.get("api_key")
     app.config["api_key"] = "test-secret-key"
     try:
         resp = client.get("/api/health?apikey=test-secret-key&foo=bar")
-        assert resp.status_code == 302, f"Expected redirect, got {resp.status_code}"
-        assert "apikey" not in resp.headers.get("Location", "")
-        assert resp.headers.get("Location", "").endswith("/api/health?foo=bar")
+        assert resp.status_code == 200, f"Expected direct API access, got {resp.status_code}"
+        assert "Location" not in resp.headers
 
         with client.session_transaction() as sess:
             assert sess.get("authenticated"), \
-                "Session should be authenticated after ?apikey= redirect"
+                "Session should be authenticated after ?apikey= API access"
     finally:
         app.config["api_key"] = old_api_key
