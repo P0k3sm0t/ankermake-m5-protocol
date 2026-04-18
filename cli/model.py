@@ -68,7 +68,9 @@ def default_home_assistant_config():
         "mqtt_username": os.getenv("HA_MQTT_USER", ""),
         "mqtt_password": os.getenv("HA_MQTT_PASSWORD", ""),
         "discovery_prefix": os.getenv("HA_MQTT_DISCOVERY_PREFIX", "homeassistant"),
-        "node_id": "ankermake_m5", # Not typically env var configured, but derived
+        "node_id": "ankermake_m5",
+        "ha_base_url": os.getenv("HA_BASE_URL", ""),
+        "ha_token": os.getenv("HA_TOKEN", ""),
     }
 
 

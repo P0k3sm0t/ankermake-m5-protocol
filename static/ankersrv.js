@@ -3235,6 +3235,25 @@ $(function () {
         $("#camera-external-name").val(camera && camera.external ? camera.external.name || "" : "");
         $("#camera-external-stream-url").val(camera && camera.external ? camera.external.stream_url || "" : "");
         $("#camera-external-snapshot-url").val(camera && camera.external ? camera.external.snapshot_url || "" : "");
+
+        const integration = camera && camera.integration ? camera.integration : {};
+        $("#camera-integration-enabled").prop("checked", !!integration.enabled);
+        $("#camera-integration-stream-url").val(integration.stream_url || "");
+        $("#camera-integration-snapshot-url").val(integration.snapshot_url || "");
+
+        const statusEl = $("#camera-integration-status");
+        if (statusEl.length) {
+            let statusText = integration.enabled
+                ? "Integration endpoint is enabled for this printer."
+                : "Integration endpoint is disabled for this printer.";
+            if (integration.ffmpeg_available === false) {
+                statusText += " Install ffmpeg to use the stream.";
+            }
+            if (integration.api_key_required) {
+                statusText += " API-key auth is active — the URLs above include your key.";
+            }
+            statusEl.text(statusText);
+        }
     }
 
     async function loadCameraSettings() {
@@ -3294,6 +3313,46 @@ $(function () {
         } finally {
             btn.prop("disabled", false);
         }
+    });
+
+    $("#camera-integration-save").on("click", async function () {
+        const btn = $(this);
+        btn.prop("disabled", true);
+        try {
+            await saveCameraSettings({
+                integration: {
+                    enabled: !!$("#camera-integration-enabled").prop("checked"),
+                },
+            }, "Integration stream settings saved");
+        } catch (err) {
+            flash_message(`Failed to save integration stream settings: ${err.message || err}`, "danger");
+        } finally {
+            btn.prop("disabled", false);
+        }
+    });
+
+    function copyIntegrationUrl(inputId, label) {
+        const url = $("#" + inputId).val().trim();
+        if (!url) {
+            flash_message("No URL to copy. Enable the integration stream and save first.", "warning");
+            return;
+        }
+        navigator.clipboard.writeText(url).then(
+            () => flash_message(`${label} copied to clipboard.`, "success"),
+            () => {
+                const el = document.getElementById(inputId);
+                if (el) { el.select(); document.execCommand("copy"); }
+                flash_message("URL selected — press Ctrl+C to copy.", "info");
+            }
+        );
+    }
+
+    $("#camera-integration-copy-stream").on("click", function () {
+        copyIntegrationUrl("camera-integration-stream-url", "Stream URL");
+    });
+
+    $("#camera-integration-copy-snapshot").on("click", function () {
+        copyIntegrationUrl("camera-integration-snapshot-url", "Snapshot URL");
     });
 
     $("#camera-source-select").on("change", async function () {
@@ -3964,8 +4023,39 @@ $(function () {
      * Print History Tab
      */
     let historyOffset = 0;
+    let historyFilter = "active";
+    let historyPrinters = [];
     const HISTORY_LIMIT = 25;
     const selectedHistoryIds = new Set();
+
+    function renderHistoryFilterDropdown(printers, activeIndex) {
+        historyPrinters = printers || [];
+        const wrap = $("#history-filter-wrap");
+        const sel = $("#history-printer-filter");
+        if (historyPrinters.length <= 1) {
+            wrap.addClass("d-none");
+            return;
+        }
+        wrap.removeClass("d-none");
+        // Rebuild options, preserving current selection
+        sel.empty();
+        sel.append('<option value="active">Active printer</option>');
+        sel.append('<option value="__all__">All printers</option>');
+        historyPrinters.forEach(function (p) {
+            const label = escapeHtml(p.name || `Printer ${p.index}`);
+            sel.append(`<option value="${p.index}">${label}</option>`);
+        });
+        sel.val(historyFilter);
+    }
+
+    function fetchAndRenderHistoryFilter() {
+        fetch("/api/printers")
+            .then(r => r.json())
+            .then(data => {
+                renderHistoryFilterDropdown(data.printers, data.active_index);
+            })
+            .catch(() => {});
+    }
 
     function formatDuration(sec) {
         if (!sec) return "-";
@@ -4008,7 +4098,8 @@ $(function () {
     }
 
     function loadHistory(append) {
-        fetch(withActivePrinterQuery(`/api/history?limit=${HISTORY_LIMIT}&offset=${historyOffset}`))
+        const filterParam = historyFilter === "__all__" ? "all" : historyFilter;
+        fetch(withActivePrinterQuery(`/api/history?limit=${HISTORY_LIMIT}&offset=${historyOffset}&filter=${encodeURIComponent(filterParam)}`))
             .then(r => r.json())
             .then(data => {
                 const tbody = $("#history-tbody");
@@ -4017,7 +4108,7 @@ $(function () {
                     selectedHistoryIds.clear();
                 }
                 if (data.entries.length === 0 && !append) {
-                    tbody.html('<tr><td colspan="6" class="text-center text-muted py-4">No history yet</td></tr>');
+                    tbody.html('<tr><td colspan="7" class="text-center text-muted py-4">No history yet</td></tr>');
                 }
                 data.entries.forEach(e => {
                     const started = e.started_at ? new Date(e.started_at + "Z").toLocaleString() : "-";
@@ -4031,8 +4122,10 @@ $(function () {
                     const actionCell = e.can_reprint
                         ? `<button class="btn btn-sm btn-outline-primary history-reprint-btn" data-history-id="${e.id}" data-history-name="${safeFilename}">Reprint</button>`
                         : '<span class="text-muted small">-</span>';
+                    const printerCell = `<td class="small text-nowrap text-muted">${escapeHtml(e.printer_name || "—")}</td>`;
                     const row = `<tr>
                         <td class="text-center align-middle">${checkboxCell}</td>
+                        ${printerCell}
                         <td class="history-file-cell" title="${safeFilename}">
                             <div class="d-flex align-items-center gap-2">
                                 ${thumbnail}
@@ -4064,9 +4157,26 @@ $(function () {
     if (historyTabBtn) {
         historyTabBtn.addEventListener("shown.bs.tab", function () {
             historyOffset = 0;
+            fetchAndRenderHistoryFilter();
             loadHistory(false);
         });
     }
+
+    $("#history-printer-filter").on("change", function () {
+        historyFilter = $(this).val();
+        historyOffset = 0;
+        loadHistory(false);
+    });
+
+    // When the active printer changes (navbar switch), reset filter to "active" and reload.
+    document.addEventListener("printerChanged", function () {
+        if ($("#history").hasClass("active")) {
+            historyFilter = "active";
+            historyOffset = 0;
+            fetchAndRenderHistoryFilter();
+            loadHistory(false);
+        }
+    });
 
     $("#history-load-more").on("click", function () {
         historyOffset += HISTORY_LIMIT;
@@ -4972,6 +5082,8 @@ $(function () {
             user: $("#mqtt-user"),
             password: $("#mqtt-password"),
             prefix: $("#mqtt-prefix"),
+            haApiBaseUrl: $("#ha-api-base-url"),
+            haApiToken: $("#ha-api-token"),
         };
         const mqttSaveBtn = $("#mqtt-save");
 
@@ -4987,6 +5099,8 @@ $(function () {
                     mqttFields.user.val(cfg.mqtt_username || "");
                     mqttFields.password.val(cfg.mqtt_password || "");
                     mqttFields.prefix.val(cfg.discovery_prefix || "homeassistant");
+                    mqttFields.haApiBaseUrl.val(cfg.ha_base_url || "");
+                    mqttFields.haApiToken.val(cfg.ha_token || "");
                 }
             } catch (err) {
                 console.error("Failed to load MQTT settings:", err);
@@ -5004,6 +5118,8 @@ $(function () {
                     mqtt_username: mqttFields.user.val().trim(),
                     mqtt_password: mqttFields.password.val().trim(),
                     discovery_prefix: mqttFields.prefix.val().trim(),
+                    ha_base_url: mqttFields.haApiBaseUrl.val().trim(),
+                    ha_token: mqttFields.haApiToken.val().trim(),
                 }
             };
             try {

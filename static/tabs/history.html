@@ -9,9 +9,17 @@
                             <button class="btn btn-sm btn-outline-danger" id="history-delete-selected" disabled>
                                 {{ macro.bi_icon("trash3") }} Delete Selected
                             </button>
-                            <button class="btn btn-sm btn-outline-danger" id="history-clear">
+                            <button class="btn btn-sm btn-outline-danger" id="history-clear" title="Clear all history (all printers)">
                                 {{ macro.bi_icon("trash") }} Clear
                             </button>
+                        </div>
+                    </div>
+                    <div class="card-body pb-0 pt-2">
+                        <div id="history-filter-wrap" class="d-none mb-2">
+                            <select class="form-select form-select-sm" id="history-printer-filter" style="max-width: 260px;" aria-label="Filter by printer">
+                                <option value="active">Active printer</option>
+                                <option value="__all__">All printers</option>
+                            </select>
                         </div>
                     </div>
                     <div class="card-body p-0">
@@ -22,6 +30,7 @@
                                         <th class="text-center" style="width: 42px;">
                                             <input type="checkbox" class="form-check-input" id="history-select-all" aria-label="Select visible history entries">
                                         </th>
+                                        <th class="text-nowrap small" style="width: 1%;">Printer</th>
                                         <th>File</th>
                                         <th>Status</th>
                                         <th>Started</th>
@@ -31,7 +40,7 @@
                                 </thead>
                                 <tbody id="history-tbody">
                                     <tr>
-                                        <td colspan="6" class="text-center text-muted py-4">
+                                        <td colspan="7" class="text-center text-muted py-4">
                                             Loading...
                                         </td>
                                     </tr>

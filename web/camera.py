@@ -50,7 +50,16 @@ def default_camera_settings():
             "snapshot_url": "",
             "refresh_sec": DEFAULT_EXTERNAL_REFRESH_SEC,
         },
+        "integration": {
+            "enabled": False,
+        },
     }
+
+
+def normalize_integration_settings(data):
+    if not isinstance(data, dict):
+        data = {}
+    return {"enabled": bool(data.get("enabled"))}
 
 
 def printer_supports_camera(printer_or_model):
@@ -112,6 +121,7 @@ def resolve_camera_settings(cfg, printer_index=0, source_override=None):
         source = _normalize_source(source_override, default=configured_source)
     external = normalize_external_camera_settings(entry.get("external"))
     external_configured = bool(external["stream_url"] or external["snapshot_url"])
+    integration = normalize_integration_settings(entry.get("integration"))
 
     effective_source = None
     if source == CAMERA_SOURCE_PRINTER and printer_supported:
@@ -146,6 +156,7 @@ def resolve_camera_settings(cfg, printer_index=0, source_override=None):
             **external,
             "configured": external_configured,
         },
+        "integration": {**integration},
     }
 
 
@@ -169,6 +180,14 @@ def update_camera_settings(cfg, printer_index, payload):
     _validate_camera_url(merged_external.get("stream_url"), "stream_url")
     _validate_camera_url(merged_external.get("snapshot_url"), "snapshot_url")
 
+    integration_payload = payload.get("integration")
+    merged_integration = normalize_integration_settings(
+        cli.model.merge_dict_defaults(
+            integration_payload if isinstance(integration_payload, dict) else {},
+            current.get("integration") or {},
+        )
+    )
+
     root = cli.model.merge_dict_defaults(getattr(cfg, "camera", None), cli.model.default_camera_config())
     per_printer = root.get("per_printer")
     if not isinstance(per_printer, dict):
@@ -176,6 +195,7 @@ def update_camera_settings(cfg, printer_index, payload):
     per_printer[printer.sn] = {
         "source": source,
         "external": merged_external,
+        "integration": merged_integration,
     }
     root["per_printer"] = per_printer
     cfg.camera = root
@@ -316,6 +336,29 @@ def open_external_mjpeg_stream(ffmpeg_path, input_url, *, scale=None):
         )
     except OSError as exc:
         raise CameraCaptureError(f"External camera stream could not start ffmpeg: {exc}") from exc
+
+
+def open_printer_mjpeg_stream(ffmpeg_path, video_url, *, fps=5, scale=None, quality=5):
+    """Open an MJPEG stream by transcoding the printer's raw H.264 /video endpoint."""
+    cmd = [
+        ffmpeg_path, "-loglevel", "error", "-nostdin",
+        "-f", "h264", "-i", video_url,
+        "-an", "-sn", "-dn",
+        "-r", str(fps),
+    ]
+    vf = _mjpeg_filter(scale)
+    if vf:
+        cmd.extend(["-vf", vf])
+    cmd.extend(["-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", str(quality), "pipe:1"])
+    try:
+        return subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        raise CameraCaptureError(f"Printer MJPEG stream could not start ffmpeg: {exc}") from exc
 
 
 def iter_mjpeg_frames(proc, *, chunk_size=8192, max_buffer=4 * 1024 * 1024, stale_timeout=_MJPEG_STALE_READ_TIMEOUT_SEC):

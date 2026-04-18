@@ -12,6 +12,8 @@ import logging
 import os
 import threading
 import time
+import urllib.error
+import urllib.request
 
 log = logging.getLogger("homeassistant")
 
@@ -74,6 +76,10 @@ class HomeAssistantService:
         self._discovery_prefix = _DEFAULT_DISCOVERY_PREFIX
         self._topic_prefix = _DEFAULT_TOPIC_PREFIX
 
+        self._ha_mjpeg_entry_id = None
+        self._ha_base_url = ""
+        self._ha_token = ""
+
         self.reload_config()
 
     def reload_config(self, config=None):
@@ -120,6 +126,9 @@ class HomeAssistantService:
         self._password = new_password
         self._discovery_prefix = new_discovery_prefix
         self._topic_prefix = new_topic_prefix
+        # Env vars take precedence over config file values
+        self._ha_base_url = (os.getenv("HA_BASE_URL") or cfg.get("ha_base_url", "")).rstrip("/")
+        self._ha_token = os.getenv("HA_TOKEN") or cfg.get("ha_token", "")
 
         if need_restart and self._enabled:
             self.stop()
@@ -140,7 +149,14 @@ class HomeAssistantService:
     # ------------------------------------------------------------------
 
     def start(self):
-        """Connect to the HA MQTT broker and publish discovery configs."""
+        """Connect to the HA MQTT broker and publish discovery configs.
+
+        Uses connect_async() + loop_start() so a broker that is briefly
+        unreachable at startup (for example, when ankerctl and Mosquitto are
+        launched together in docker-compose) does not permanently disable HA
+        integration. paho's background thread retries with exponential
+        backoff.
+        """
         if not self._enabled:
             return
 
@@ -157,19 +173,32 @@ class HomeAssistantService:
         self._client.on_disconnect = self._on_disconnect
         self._client.on_message = self._on_message
 
+        # Bound reconnect backoff so brief broker outages recover quickly
+        # but sustained unreachability doesn't hammer the network.
+        self._client.reconnect_delay_set(min_delay=1, max_delay=60)
+
         # Set LWT (Last Will and Testament) so HA marks device offline
         avail_topic = self._availability_topic()
         self._client.will_set(avail_topic, payload="offline", qos=1, retain=True)
 
         try:
-            self._client.connect(self._host, self._port, keepalive=60)
-            self._client.loop_start()
-        except Exception as err:
-            log.error(f"HA MQTT: connection failed: {err}")
+            # connect_async() stores params without doing network I/O.
+            # loop_start() spins up paho's background thread which performs
+            # the initial connect and any subsequent reconnect attempts.
+            self._client.connect_async(self._host, self._port, keepalive=60)
+        except (ValueError, OSError) as err:
+            # Raised only for invalid host/port syntax, not for transient
+            # unreachability. Treat as a genuine misconfiguration.
+            log.error(f"HA MQTT: invalid broker configuration: {err}")
             self._client = None
+            return
+
+        self._client.loop_start()
 
     def stop(self):
         """Disconnect from the HA MQTT broker and mark device offline."""
+        self._unregister_ha_mjpeg_camera()
+
         if not self._client:
             return
 
@@ -224,6 +253,9 @@ class HomeAssistantService:
             target=self._availability_loop, args=(gen,), daemon=True, name="ha-mqtt-avail"
         )
         self._availability_thread.start()
+
+        # Register MJPEG camera via HA config_entries REST API (best-effort)
+        self._register_ha_mjpeg_camera()
 
     def _on_disconnect(self, client, userdata, rc):
         self._connected = False
@@ -491,16 +523,19 @@ class HomeAssistantService:
         topic = f"{self._discovery_prefix}/switch/{self._node_id}/light/config"
         self._publish(topic, json.dumps(light_config), retain=True)
 
-        # Camera entity (MJPEG stream)
+        # Camera entity — use url_template pointing at /api/snapshot for HA MQTT camera
         flask_host = os.getenv("FLASK_HOST") or "127.0.0.1"
         if flask_host in ("0.0.0.0", "::"):
             flask_host = "127.0.0.1"
         flask_port = os.getenv("FLASK_PORT") or "4470"
+        snapshot_url = f"http://{flask_host}:{flask_port}/api/snapshot"
+        stream_url = f"http://{flask_host}:{flask_port}/api/camera/stream"
         camera_config = {
             "name": "Camera",
             "unique_id": f"{self._node_id}_camera",
             "object_id": f"{self._node_id}_camera",
             "topic": f"{self._topic_prefix}/{self._printer_sn}/camera",
+            "url_template": snapshot_url,
             "device": device,
             "availability": availability,
             "icon": "mdi:camera",
@@ -508,5 +543,141 @@ class HomeAssistantService:
         topic = f"{self._discovery_prefix}/camera/{self._node_id}/camera/config"
         self._publish(topic, json.dumps(camera_config), retain=True)
 
+        log.info(f"HA camera stream available at: {stream_url}")
+        log.info(f"HA camera snapshot available at: {snapshot_url}")
         log.info(f"HA MQTT: published discovery configs ({len(sensors)} sensors, "
                  f"{len(binary_sensors)} binary sensors, 1 switch, 1 camera)")
+
+    # ------------------------------------------------------------------
+    # HA REST API — MJPEG IP Camera config entry
+    # ------------------------------------------------------------------
+
+    def _ha_web_urls(self):
+        """Return (mjpeg_url, snapshot_url) for this ankerctl instance.
+
+        Uses the same host/port resolution as _publish_discovery().
+        Appends printer_index and apikey query params when available.
+        """
+        flask_host = os.getenv("FLASK_HOST") or "127.0.0.1"
+        if flask_host in ("0.0.0.0", "::"):
+            flask_host = "127.0.0.1"
+        flask_port = os.getenv("FLASK_PORT") or "4470"
+
+        params = f"printer_index={self._printer_index}"
+        api_key = os.getenv("ANKERCTL_API_KEY", "")
+        if api_key:
+            params += f"&apikey={api_key}"
+
+        mjpeg_url = f"http://{flask_host}:{flask_port}/api/camera/stream?{params}"
+        snapshot_url = f"http://{flask_host}:{flask_port}/api/snapshot?{params}"
+        return mjpeg_url, snapshot_url
+
+    def _ha_rest_request(self, method, path, body=None, ha_base_url=None, ha_token=None):
+        """Execute a HA REST API request via urllib.request.
+
+        Returns the parsed JSON response body on success, or None on error.
+        Logs HTTP and network errors at DEBUG level (all are non-fatal).
+        """
+        url = f"{ha_base_url}{path}"
+        headers = {
+            "Authorization": f"Bearer {ha_token}",
+            "Content-Type": "application/json",
+        }
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as err:
+            log.debug(f"HA REST: {method} {path} → HTTP {err.code}: {err.reason}")
+        except urllib.error.URLError as err:
+            log.debug(f"HA REST: {method} {path} → {err.reason}")
+        except Exception as err:
+            log.debug(f"HA REST: {method} {path} → {err}")
+        return None
+
+    def _register_ha_mjpeg_camera(self):
+        """Register an MJPEG IP Camera config entry in Home Assistant.
+
+        Reads HA_BASE_URL and HA_TOKEN from environment on each call so that
+        config changes take effect on reconnect without a service restart.
+        Returns silently if either env var is missing or on any error.
+        """
+        ha_base_url = self._ha_base_url
+        ha_token = self._ha_token
+        if not ha_base_url or not ha_token:
+            return
+
+        mjpeg_url, snapshot_url = self._ha_web_urls()
+        camera_name = f"AnkerMake {self._printer_sn}"
+
+        # Idempotency check: look for an existing ankerctl mjpeg entry
+        entries = self._ha_rest_request(
+            "GET", "/api/config/config_entries",
+            ha_base_url=ha_base_url, ha_token=ha_token,
+        )
+        if entries is None:
+            log.debug("HA REST: could not fetch config entries — skipping MJPEG registration")
+            return
+        if isinstance(entries, list):
+            for entry in entries:
+                if entry.get("domain") == "mjpeg" and "ankerctl" in entry.get("title", ""):
+                    self._ha_mjpeg_entry_id = entry.get("entry_id")
+                    log.debug(f"HA REST: existing MJPEG camera entry found ({self._ha_mjpeg_entry_id}), skipping")
+                    return
+
+        # Start config flow
+        flow_resp = self._ha_rest_request(
+            "POST", "/api/config/config_entries/flow",
+            body={"handler": "mjpeg", "show_advanced_options": False},
+            ha_base_url=ha_base_url, ha_token=ha_token,
+        )
+        if not flow_resp or "flow_id" not in flow_resp:
+            log.warning("HA REST: failed to start MJPEG config flow")
+            return
+
+        flow_id = flow_resp["flow_id"]
+
+        # Complete the config flow with camera details
+        result = self._ha_rest_request(
+            "POST", f"/api/config/config_entries/flow/{flow_id}",
+            body={
+                "mjpeg_url": mjpeg_url,
+                "still_image_url": snapshot_url,
+                "name": camera_name,
+                "verify_ssl": False,
+            },
+            ha_base_url=ha_base_url, ha_token=ha_token,
+        )
+        if not result:
+            log.warning("HA REST: failed to complete MJPEG config flow")
+            return
+
+        if result.get("type") == "create_entry":
+            self._ha_mjpeg_entry_id = result.get("entry_id")
+            log.info(f"HA: registered MJPEG camera {self._ha_mjpeg_entry_id}")
+        else:
+            log.warning(f"HA REST: unexpected flow result type: {result.get('type')}")
+
+    def _unregister_ha_mjpeg_camera(self):
+        """Delete the MJPEG IP Camera config entry from Home Assistant on stop."""
+        if not self._ha_mjpeg_entry_id:
+            return
+
+        ha_base_url = self._ha_base_url
+        ha_token = self._ha_token
+        if not ha_base_url or not ha_token:
+            self._ha_mjpeg_entry_id = None
+            return
+
+        entry_id = self._ha_mjpeg_entry_id
+        result = self._ha_rest_request(
+            "DELETE", f"/api/config/config_entries/{entry_id}",
+            ha_base_url=ha_base_url, ha_token=ha_token,
+        )
+        if result is not None:
+            log.info(f"HA: unregistered MJPEG camera {entry_id}")
+        else:
+            log.debug(f"HA: could not unregister MJPEG camera {entry_id} (may already be gone)")
+
+        self._ha_mjpeg_entry_id = None

@@ -290,13 +290,16 @@ class TestAuthenticationBypass:
         assert response.status_code == 401
 
     def test_api_key_query_string_bootstraps_session_and_strips_url(self, tmp_path):
-        """Valid URL API key starts a browser session and redirects to a clean URL."""
+        """Valid URL API key authenticates API requests directly and still seeds the session."""
         client = app.test_client()
         old_values, old_svc, old_filaments = _install_security_state(tmp_path)
         try:
             response = client.get(f"/api/filaments?apikey={API_KEY}&foo=bar")
-            assert response.status_code == 302
-            assert "apikey" not in response.headers["Location"]
+            assert response.status_code == 200
+            assert "Location" not in response.headers
+
+            with client.session_transaction() as session:
+                assert session["authenticated"] is True
 
             session_response = client.get("/api/filaments")
         finally:

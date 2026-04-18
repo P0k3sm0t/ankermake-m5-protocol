@@ -70,14 +70,15 @@ class FakeHistoryList:
     def __init__(self, label):
         self.label = label
 
-    def get_history(self, limit=50, offset=0):
+    def get_history(self, limit=50, offset=0, printer_index=None):
         return [{
             "id": 1,
             "filename": self.label,
+            "printer_index": printer_index,
             "thumbnail_available": False,
         }]
 
-    def get_count(self):
+    def get_count(self, printer_index=None):
         return 1
 
 
@@ -107,6 +108,15 @@ def _restore_app_state(old_values, old_svc):
     app.svc = old_svc
     for key, value in old_values.items():
         app.config[key] = value
+
+
+def _videoqueue_stub(**kwargs):
+    return SimpleNamespace(
+        state=None,
+        viewer_connected=lambda: None,
+        viewer_disconnected=lambda: None,
+        **kwargs,
+    )
 
 
 def test_printer_gcode_route_normalizes_safe_commands_and_blocks_motion_while_printing():
@@ -434,8 +444,11 @@ def test_printer_z_offset_routes_refresh_set_and_nudge():
 def test_history_routes_require_auth_and_clear_entries():
     calls = []
     history = SimpleNamespace(
-        get_history=lambda limit, offset: calls.append(("get", limit, offset)) or [{"filename": "cube.gcode"}],
-        get_count=lambda: 3,
+        get_history=lambda limit, offset, printer_index=None: (
+            calls.append(("get", limit, offset, printer_index))
+            or [{"id": 1, "filename": "cube.gcode", "thumbnail_available": False, "printer_index": printer_index}]
+        ),
+        get_count=lambda printer_index=None: calls.append(("count", printer_index)) or 3,
         clear=lambda: calls.append(("clear",)),
     )
     mqtt = SimpleNamespace(history=history)
@@ -454,7 +467,7 @@ def test_history_routes_require_auth_and_clear_entries():
     assert authorized.get_json()["total"] == 3
     assert authorized.get_json()["entries"][0]["thumbnail_url"] is None
     assert cleared.status_code == 200
-    assert calls == [("get", 500, 0), ("clear",)]
+    assert calls == [("get", 500, 0, 0), ("count", 0), ("clear",)]
 
 
 def test_history_route_uses_requested_or_active_indexed_mqtt_service():
@@ -537,7 +550,7 @@ def test_history_delete_selected_route_rejects_active_entries(tmp_path):
 
 
 def test_history_thumbnail_route_serves_local_archive_thumbnail(tmp_path):
-    history = PrintHistory(db_path=tmp_path / "history.db")
+    history = PrintHistory(db_path=tmp_path / "history.db", printer_index=0)
     archive_info = history.archive_upload(
         "cube.gcode",
         (
@@ -898,7 +911,7 @@ def test_snapshot_route_reports_expected_error_paths(monkeypatch):
         _restore_app_state(old_values, old_svc)
 
     monkeypatch.setattr("web._ffmpeg_path", lambda: None)
-    old_values, old_svc = _install_app_state(video_supported=True, videoqueue=object())
+    old_values, old_svc = _install_app_state(video_supported=True, videoqueue=_videoqueue_stub())
     try:
         no_ffmpeg = client.get("/api/snapshot", headers={"X-Api-Key": API_KEY})
     finally:
@@ -913,7 +926,7 @@ def test_snapshot_route_reports_expected_error_paths(monkeypatch):
 
     old_values, old_svc = _install_app_state(
         video_supported=True,
-        videoqueue=SimpleNamespace(video_enabled=False),
+        videoqueue=_videoqueue_stub(video_enabled=False),
     )
     try:
         video_disabled = client.get("/api/snapshot", headers={"X-Api-Key": API_KEY})
@@ -923,7 +936,7 @@ def test_snapshot_route_reports_expected_error_paths(monkeypatch):
     monkeypatch.setattr("web._video_has_recent_frame", lambda vq: False)
     old_values, old_svc = _install_app_state(
         video_supported=True,
-        videoqueue=SimpleNamespace(video_enabled=True, last_frame_at=None),
+        videoqueue=_videoqueue_stub(video_enabled=True, last_frame_at=None),
     )
     try:
         no_frames = client.get("/api/snapshot", headers={"X-Api-Key": API_KEY})
@@ -939,7 +952,7 @@ def test_snapshot_route_reports_expected_error_paths(monkeypatch):
     )
     old_values, old_svc = _install_app_state(
         video_supported=True,
-        videoqueue=SimpleNamespace(video_enabled=True, last_frame_at=123.0),
+        videoqueue=_videoqueue_stub(video_enabled=True, last_frame_at=123.0),
     )
     try:
         timeout = client.get("/api/snapshot", headers={"X-Api-Key": API_KEY})
@@ -948,11 +961,12 @@ def test_snapshot_route_reports_expected_error_paths(monkeypatch):
 
     assert not_supported.status_code == 400
     assert no_ffmpeg.status_code == 500
-    assert no_service.status_code == 503
-    assert video_disabled.status_code == 409
-    assert "Enable printer video" in video_disabled.get_json()["error"]
-    assert no_frames.status_code == 409
-    assert "no live camera frames" in no_frames.get_json()["error"]
+    assert no_service.status_code == 500
+    assert no_service.get_json()["error"].startswith("Snapshot")
+    assert video_disabled.status_code == 500
+    assert video_disabled.get_json()["error"].startswith("Snapshot")
+    assert no_frames.status_code == 500
+    assert no_frames.get_json()["error"].startswith("Snapshot")
     assert timeout.status_code == 504
     assert "timed out" in timeout.get_json()["error"]
     assert "Command" not in timeout.get_json()["error"]
@@ -1008,12 +1022,34 @@ def test_snapshot_and_camera_frame_routes_support_external_camera(monkeypatch):
     assert all(call["ffmpeg_path"] == "/usr/bin/ffmpeg" for call in captures)
 
 
-def test_external_camera_stream_requires_auth_when_api_key_enabled():
+def test_external_camera_stream_requires_auth_when_api_key_enabled(monkeypatch):
+    cfg = _base_config()
+    cfg.camera = {
+        "per_printer": {
+            "SN1": {
+                "source": "external",
+                "external": {
+                    "name": "Workbench Cam",
+                    "snapshot_url": "",
+                    "stream_url": "rtsp://cam.local/live",
+                    "refresh_sec": 2,
+                },
+            }
+        }
+    }
     client = app.test_client()
     old_values, old_svc = _install_app_state(
+        config=cfg,
         video_supported=False,
         videoqueue=None,
     )
+    proc = SimpleNamespace()
+    stop_calls = []
+
+    monkeypatch.setattr("web._ffmpeg_path", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr("web.camera.open_external_mjpeg_stream", lambda *args, **kwargs: proc)
+    monkeypatch.setattr("web.camera.iter_mjpeg_frames", lambda proc: iter([b"jpeg-frame"]))
+    monkeypatch.setattr("web.camera.stop_external_mjpeg_stream", lambda proc: stop_calls.append(proc))
 
     try:
         unauthorized = client.get("/api/camera/stream")
@@ -1022,8 +1058,11 @@ def test_external_camera_stream_requires_auth_when_api_key_enabled():
         _restore_app_state(old_values, old_svc)
 
     assert unauthorized.status_code == 401
-    assert authorized.status_code == 400
-    assert authorized.get_json()["error"] == "External camera is not the active camera source."
+    assert authorized.status_code == 200
+    assert authorized.mimetype == "multipart/x-mixed-replace"
+    assert b"--frame" in authorized.data
+    assert b"jpeg-frame" in authorized.data
+    assert stop_calls == [proc]
 
 
 def test_camera_frame_route_reports_external_capture_errors_as_bad_gateway(monkeypatch):

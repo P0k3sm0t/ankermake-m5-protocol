@@ -561,13 +561,22 @@ class PrintHistory:
         """Backward-compatible alias used by older tests and callers."""
         self._init_db()
 
-    def get_history(self, limit=50, offset=0):
-        """Return recent print history as list of dicts."""
+    def get_history(self, limit=50, offset=0, printer_index=None):
+        """Return recent print history as list of dicts.
+
+        Pass printer_index to restrict to one printer; None returns all.
+        """
+        params = []
+        where = ""
+        if printer_index is not None:
+            where = " WHERE printer_index=?"
+            params.append(int(printer_index))
+        params.extend([limit, offset])
         with self._lock:
             with self._connect() as conn:
                 rows = conn.execute(
-                    "SELECT * FROM print_history ORDER BY id DESC LIMIT ? OFFSET ?",
-                    (limit, offset)
+                    f"SELECT * FROM print_history{where} ORDER BY id DESC LIMIT ? OFFSET ?",
+                    params,
                 ).fetchall()
                 return [self._decorate_entry(r, conn=conn) for r in rows]
 
@@ -625,11 +634,17 @@ class PrintHistory:
         """Backward-compatible alias for get_history()."""
         return self.get_history(limit=limit, offset=offset)
 
-    def get_count(self):
-        """Return total number of entries."""
+    def get_count(self, printer_index=None):
+        """Return total number of entries. Pass printer_index to filter by printer."""
+        where, params = "", ()
+        if printer_index is not None:
+            where = " WHERE printer_index=?"
+            params = (int(printer_index),)
         with self._lock:
             with self._connect() as conn:
-                return conn.execute("SELECT COUNT(*) FROM print_history").fetchone()[0]
+                return conn.execute(
+                    f"SELECT COUNT(*) FROM print_history{where}", params
+                ).fetchone()[0]
 
     def delete_entries(self, entry_ids):
         ids = []

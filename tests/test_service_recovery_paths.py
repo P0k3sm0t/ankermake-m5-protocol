@@ -250,13 +250,14 @@ def test_video_queue_disable_cancels_recovery_with_connected_viewer():
 
     assert queue.set_video_enabled(False) is True
 
-    assert stop_calls == [True]
+    assert stop_calls == []
     assert queue.video_enabled is False
-    assert queue.wanted is False
+    assert queue.wanted is True
     assert queue._pending_disable is False
-    assert queue._awaiting_pppp_recycle is False
-    assert queue._pppp_recycle_requested_at is None
-    assert queue._stall_retry_count == 0
+    assert queue._awaiting_pppp_recycle is True
+    assert queue._pppp_recycle_requested_at == 100.0
+    assert queue._stall_retry_count == 2
+    assert queue.persistent is True
 
     queue.video_enabled = True
     queue.wanted = True
@@ -266,7 +267,7 @@ def test_video_queue_disable_cancels_recovery_with_connected_viewer():
     assert queue.set_video_enabled(False) is True
 
     assert stop_calls == []
-    assert queue.wanted is False
+    assert queue.wanted is True
 
 
 def test_video_queue_disable_live_view_keeps_timelapse_stream_running():

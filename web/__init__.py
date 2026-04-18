@@ -1094,7 +1094,7 @@ FILAMENT_SWAP_ADVANCED_CONFIG_DEFAULT = {
     "commands": {
         "set_nozzle_temp": "M104 S{temp_c}",
         "cooldown_nozzle": "M104 S0",
-        "home_all": "native:home_all",
+        "home_all": "native:home_z",
         "relative_mode": "G91",
         "z_lift": "G1 Z{z_lift_mm} F{z_feedrate}",
         "wait_for_moves": "M400",
@@ -1275,7 +1275,11 @@ def _merge_filament_swap_advanced_config(loaded):
     user_commands = loaded.get("commands") or {}
     if isinstance(user_commands, dict):
         for key, value in user_commands.items():
-            commands[str(key)] = _coerce_filament_swap_command(value)
+            coerced = _coerce_filament_swap_command(value)
+            if key == "home_all" and coerced.strip().lower() in {"native:home_all", "native:all", "native:home_all "}:
+                coerced = "native:home_z"
+                changed = True
+            commands[str(key)] = coerced
     else:
         changed = True
     if merged.get("commands") != commands:
@@ -2619,17 +2623,24 @@ def video_download():
         if not app.config["login"] or not _printer_video_supported(printer_index=printer_index):
             return
         vq = get_video_service(printer_index)
-        if vq:
-            if not for_timelapse and not getattr(vq, "video_enabled", False):
-                return
+        if not vq:
+            for msg in stream_videoqueue(printer_index, maxsize=VIDEO_STREAM_QUEUE_MAX):
+                yield msg.data
+            return
+        if not for_timelapse and not getattr(vq, "video_enabled", False):
+            return
+        vq.viewer_connected()
+        try:
             if vq.state == RunState.Stopped:
                 try:
                     vq.start()
                     vq.await_ready()
                 except ServiceStoppedError:
                     return
-        for msg in stream_videoqueue(printer_index, maxsize=VIDEO_STREAM_QUEUE_MAX):
-            yield msg.data
+            for msg in stream_videoqueue(printer_index, maxsize=VIDEO_STREAM_QUEUE_MAX):
+                yield msg.data
+        finally:
+            vq.viewer_disconnected()
 
     return Response(generate(), mimetype="video/mp4")
 
@@ -3265,6 +3276,22 @@ def app_api_notifications_test():
     return {"error": message}, 400
 
 
+def _enrich_camera_integration(camera_config, printer_index):
+    integration = dict(camera_config.get("integration") or {})
+    ffmpeg_path = _ffmpeg_path()
+    integration["ffmpeg_available"] = bool(ffmpeg_path)
+    api_key = app.config.get("api_key")
+    integration["api_key_required"] = bool(api_key)
+    base = request.host_url.rstrip("/")
+    pi = int(printer_index)
+    suffix = f"?printer_index={pi}"
+    if api_key:
+        suffix += f"&apikey={api_key}"
+    integration["stream_url"] = f"{base}/api/camera/stream{suffix}"
+    integration["snapshot_url"] = f"{base}/api/snapshot{suffix}"
+    return {**camera_config, "integration": integration}
+
+
 @app.get("/api/settings/camera")
 def app_api_settings_camera():
     config = app.config["config"]
@@ -3273,7 +3300,7 @@ def app_api_settings_camera():
         if not cfg:
             return {"error": "No printers configured"}, 400
         camera_config = _resolve_camera_settings(cfg, printer_index=printer_index)
-    return {"camera": camera_config}
+    return {"camera": _enrich_camera_integration(camera_config, printer_index)}
 
 
 @app.post("/api/settings/camera")
@@ -3296,7 +3323,7 @@ def app_api_settings_camera_update():
         except ValueError as exc:
             return {"error": str(exc)}, 400
 
-    return {"status": "ok", "camera": camera_config}
+    return {"status": "ok", "camera": _enrich_camera_integration(camera_config, printer_index)}
 
 
 @app.post("/api/settings/launcher-bat")
@@ -4136,7 +4163,7 @@ def _validate_selected_printer_camera(camera_settings, *, stream_state=True):
     return None
 
 
-def _capture_selected_camera_snapshot_temp(camera_settings, *, scale=None, for_timelapse=False):
+def _capture_selected_camera_snapshot_temp(camera_settings, *, scale=None, for_timelapse=False, require_active_stream=True):
     camera_error = _validate_selected_printer_camera(camera_settings, stream_state=False)
     if camera_error is not None:
         raise ValueError(camera_error)
@@ -4145,9 +4172,10 @@ def _capture_selected_camera_snapshot_temp(camera_settings, *, scale=None, for_t
     if not ffmpeg_path:
         raise RuntimeError("ffmpeg not installed")
 
-    camera_error = _validate_selected_printer_camera(camera_settings, stream_state=True)
-    if camera_error is not None:
-        raise ValueError(camera_error)
+    if require_active_stream:
+        camera_error = _validate_selected_printer_camera(camera_settings, stream_state=True)
+        if camera_error is not None:
+            raise ValueError(camera_error)
 
     temp_path = web.camera.create_temp_snapshot_file()
     host, port = _local_web_host_port()
@@ -4199,44 +4227,126 @@ def app_api_camera_frame():
     return send_file(temp_path, mimetype="image/jpeg", as_attachment=False)
 
 
+def _prewarm_video_service(printer_index, timeout=8.0):
+    """Start the VideoQueue and wait for frames before ffmpeg connects.
+
+    Calls viewer_connected() so _video_requested() returns True immediately,
+    which causes worker_run() to activate the live stream rather than idling.
+    Returns the VideoQueue instance so the caller can release the viewer session
+    via viewer_disconnected() after the capture is complete.
+    """
+    vq = get_video_service(printer_index)
+    if not vq:
+        return None
+    vq.viewer_connected()
+    if vq.state == RunState.Stopped:
+        try:
+            vq.start()
+            vq.await_ready()
+        except Exception:
+            vq.viewer_disconnected()
+            return None
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _video_has_recent_frame(vq):
+            break
+        time.sleep(0.15)
+    return vq
+
+
 @app.get("/api/camera/stream")
 def app_api_camera_stream():
-    """Return a persistent MJPEG preview stream for RTSP external cameras."""
+    """Return a persistent MJPEG preview stream for both printer and external cameras."""
     printer_index = _requested_printer_index()
     camera_settings = _resolve_camera_settings(printer_index=printer_index)
-    if camera_settings.get("effective_source") != web.camera.CAMERA_SOURCE_EXTERNAL:
-        return {"error": "External camera is not the active camera source."}, 400
+    effective_source = camera_settings.get("effective_source")
 
-    stream_url = web.camera.external_stream_url(camera_settings)
-    if not stream_url:
-        return {"error": "External camera has no stream URL configured."}, 400
-    ffmpeg_path = _ffmpeg_path()
-    if not ffmpeg_path:
-        return {"error": "ffmpeg not installed"}, 500
-
+    fps_raw = request.args.get("fps", None)
+    quality_raw = request.args.get("quality", "5")
     try:
-        proc = web.camera.open_external_mjpeg_stream(
-            ffmpeg_path,
-            stream_url,
-            scale=(1280, 720),
-        )
-    except web.camera.CameraCaptureError as exc:
-        return {"error": str(exc)}, 502
+        fps = int(fps_raw) if fps_raw is not None else None
+        quality = max(1, min(31, int(quality_raw)))
+    except (TypeError, ValueError):
+        fps = None
+        quality = 5
 
-    boundary = b"frame"
+    if effective_source == web.camera.CAMERA_SOURCE_PRINTER:
+        ffmpeg_path = _ffmpeg_path()
+        if not ffmpeg_path:
+            return {"error": "ffmpeg not installed"}, 500
 
-    def generate():
-        try:
-            for frame in web.camera.iter_mjpeg_frames(proc):
-                yield (
-                    b"--" + boundary + b"\r\n"
-                    b"Content-Type: image/jpeg\r\n"
-                    b"Cache-Control: no-store\r\n"
-                    b"Content-Length: " + str(len(frame)).encode("ascii") + b"\r\n\r\n"
-                    + frame + b"\r\n"
+        flask_host, flask_port = _local_web_host_port()
+        api_key = app.config.get("api_key")
+
+        # The prewarm blocks until frames flow (~4s cold start). Werkzeug buffers
+        # headers together with the first body chunk, so HA/Frigate would time
+        # out waiting for headers. Yielding a 2-byte MJPEG preamble first flushes
+        # headers immediately; MJPEG clients ignore pre-boundary preamble data.
+        def generate():
+            yield b"\r\n"  # flush response headers before blocking on prewarm
+            prewarm_vq = _prewarm_video_service(printer_index)
+            video_url = (
+                f"http://{flask_host}:{flask_port}/video"
+                f"?for_timelapse=1&printer_index={printer_index}"
+            )
+            if api_key:
+                video_url += f"&apikey={api_key}"
+            try:
+                proc = web.camera.open_printer_mjpeg_stream(
+                    ffmpeg_path,
+                    video_url,
+                    fps=fps or 5,
+                    scale=(1280, 720),
+                    quality=quality,
                 )
-        finally:
-            web.camera.stop_external_mjpeg_stream(proc)
+                try:
+                    for frame in web.camera.iter_mjpeg_frames(proc):
+                        yield (
+                            b"--frame\r\n"
+                            b"Content-Type: image/jpeg\r\n"
+                            b"Cache-Control: no-store\r\n"
+                            b"Content-Length: " + str(len(frame)).encode("ascii") + b"\r\n\r\n"
+                            + frame + b"\r\n"
+                        )
+                finally:
+                    web.camera.stop_external_mjpeg_stream(proc)
+            except web.camera.CameraCaptureError:
+                pass
+            finally:
+                if prewarm_vq is not None:
+                    prewarm_vq.viewer_disconnected()
+
+    elif effective_source == web.camera.CAMERA_SOURCE_EXTERNAL:
+        stream_url = web.camera.external_stream_url(camera_settings)
+        if not stream_url:
+            return {"error": "External camera has no stream URL configured."}, 400
+        ffmpeg_path = _ffmpeg_path()
+        if not ffmpeg_path:
+            return {"error": "ffmpeg not installed"}, 500
+        try:
+            proc = web.camera.open_external_mjpeg_stream(
+                ffmpeg_path,
+                stream_url,
+                scale=(1280, 720),
+            )
+        except web.camera.CameraCaptureError as exc:
+            return {"error": str(exc)}, 502
+
+        def generate():
+            try:
+                for frame in web.camera.iter_mjpeg_frames(proc):
+                    yield (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n"
+                        b"Cache-Control: no-store\r\n"
+                        b"Content-Length: " + str(len(frame)).encode("ascii") + b"\r\n\r\n"
+                        + frame + b"\r\n"
+                    )
+            finally:
+                web.camera.stop_external_mjpeg_stream(proc)
+
+    else:
+        return {"error": "No camera source is currently active."}, 400
 
     response = Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
     response.headers["Cache-Control"] = "no-store"
@@ -4255,8 +4365,14 @@ def app_api_snapshot():
     if not camera_settings.get("effective_source"):
         return {"error": camera_settings.get("detail") or "No camera source is available"}, 400
 
+    prewarm_vq = None
+    if camera_settings.get("effective_source") == web.camera.CAMERA_SOURCE_PRINTER:
+        prewarm_vq = _prewarm_video_service(printer_index)
+
     try:
-        temp_path = _capture_selected_camera_snapshot_temp(camera_settings)
+        temp_path = _capture_selected_camera_snapshot_temp(
+            camera_settings, for_timelapse=True, require_active_stream=False
+        )
     except ValueError as exc:
         payload, status = exc.args[0]
         return payload, status
@@ -4268,6 +4384,9 @@ def app_api_snapshot():
         return {"error": str(exc)}, 500
     except OSError as err:
         return {"error": f"Snapshot could not run ffmpeg: {err}"}, 500
+    finally:
+        if prewarm_vq is not None:
+            prewarm_vq.viewer_disconnected()
 
     taken_at = datetime.now()
     with borrow_mqtt(printer_index) as mqtt:
@@ -4290,28 +4409,51 @@ def app_api_snapshot():
             pass
         return response
 
-    timestamp = taken_at.strftime("%Y%m%d_%H%M%S")
-    return send_file(
-        temp_path,
-        mimetype="image/jpeg",
-        as_attachment=True,
-        download_name=f"ankerctl_snapshot_{timestamp}.jpg",
-    )
+    return send_file(temp_path, mimetype="image/jpeg", as_attachment=False)
 
 @app.get("/api/history")
 def app_api_history():
-    """Return print history as JSON with pagination."""
+    """Return print history as JSON with pagination.
+
+    Query params:
+      filter: "active" (default) | "all" | <integer printer index>
+    """
     printer_index = _requested_printer_index()
     limit = request.args.get("limit", 50, type=int)
     offset = request.args.get("offset", 0, type=int)
-    # Clamp parameters to safe ranges to prevent excessive queries or errors
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
+
+    filter_arg = (request.args.get("filter") or "active").lower()
+    if filter_arg == "all":
+        history_filter = None
+    elif filter_arg == "active":
+        history_filter = printer_index
+    else:
+        try:
+            history_filter = int(filter_arg)
+        except (TypeError, ValueError):
+            history_filter = printer_index
+
+    # Build a name lookup from config so each entry carries a printer_name.
+    printer_names = {}
+    config = app.config.get("config")
+    if config:
+        try:
+            with config.open() as cfg:
+                if cfg:
+                    for i, p in enumerate(cfg.printers):
+                        printer_names[i] = p.name
+        except Exception:
+            pass
+
     with borrow_mqtt(printer_index) as mqtt:
         if not mqtt:
             return {"entries": [], "total": 0}
-        entries = mqtt.history.get_history(limit=limit, offset=offset)
-        total = mqtt.history.get_count()
+        entries = mqtt.history.get_history(
+            limit=limit, offset=offset, printer_index=history_filter
+        )
+        total = mqtt.history.get_count(printer_index=history_filter)
     serialized_entries = []
     for entry in entries:
         item = dict(entry)
@@ -4320,6 +4462,11 @@ def app_api_history():
             if item.get("thumbnail_available")
             else None
         )
+        pi = item.get("printer_index")
+        if pi is not None:
+            item["printer_name"] = printer_names.get(pi, f"Printer {pi}")
+        else:
+            item["printer_name"] = None
         serialized_entries.append(item)
     return {"entries": serialized_entries, "total": total}
 
@@ -5546,11 +5693,16 @@ def _check_api_key():
     if request.path.startswith("/static/"):
         return None
 
-    # Check ?apikey= URL parameter early so the browser UI can bootstrap an
-    # authenticated session, then redirect to strip it from the visible URL.
+    # Check ?apikey= URL parameter. For browser UI navigation we redirect to
+    # strip the key from the visible URL and set a session cookie instead.
+    # API endpoints and /video are accessed by programmatic clients (HA, ffmpeg,
+    # Frigate) that don't persist session cookies across redirects, so skip the
+    # redirect entirely and let the request proceed directly.
     url_key = request.args.get("apikey")
     if url_key and secrets.compare_digest(url_key, api_key):
         session["authenticated"] = True
+        if request.path.startswith("/api/") or request.path == "/video":
+            return None
         from flask import redirect
         params = {key: values for key, values in request.args.lists() if key != "apikey"}
         clean_url = _safe_same_site_redirect_target(request.path, params)
