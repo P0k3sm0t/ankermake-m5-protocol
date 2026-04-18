@@ -4275,34 +4275,48 @@ def app_api_camera_stream():
         if not ffmpeg_path:
             return {"error": "ffmpeg not installed"}, 500
 
-        # Pre-warm the VideoQueue: viewer_connected() activates _video_requested()
-        # so worker_run() starts the live stream immediately. This cuts cold-start
-        # latency from ~11s to ~3-5s so HA/Frigate don't time out on first connect.
-        prewarm_vq = _prewarm_video_service(printer_index)
-
-        # Build internal URL to the raw H.264 stream
         flask_host, flask_port = _local_web_host_port()
-        video_url = f"http://{flask_host}:{flask_port}/video?for_timelapse=1&printer_index={printer_index}"
-        # Pass API key when one is configured (the /video endpoint enforces it)
         api_key = app.config.get("api_key")
-        if api_key:
-            video_url += f"&apikey={api_key}"
 
-        try:
-            proc = web.camera.open_printer_mjpeg_stream(
-                ffmpeg_path,
-                video_url,
-                fps=fps or 5,
-                scale=(1280, 720),
-                quality=quality,
+        # The prewarm blocks until frames flow (~4s cold start). Werkzeug buffers
+        # headers together with the first body chunk, so HA/Frigate would time
+        # out waiting for headers. Yielding a 2-byte MJPEG preamble first flushes
+        # headers immediately; MJPEG clients ignore pre-boundary preamble data.
+        def generate():
+            yield b"\r\n"  # flush response headers before blocking on prewarm
+            prewarm_vq = _prewarm_video_service(printer_index)
+            video_url = (
+                f"http://{flask_host}:{flask_port}/video"
+                f"?for_timelapse=1&printer_index={printer_index}"
             )
-        except web.camera.CameraCaptureError as exc:
-            if prewarm_vq is not None:
-                prewarm_vq.viewer_disconnected()
-            return {"error": str(exc)}, 502
+            if api_key:
+                video_url += f"&apikey={api_key}"
+            try:
+                proc = web.camera.open_printer_mjpeg_stream(
+                    ffmpeg_path,
+                    video_url,
+                    fps=fps or 5,
+                    scale=(1280, 720),
+                    quality=quality,
+                )
+                try:
+                    for frame in web.camera.iter_mjpeg_frames(proc):
+                        yield (
+                            b"--frame\r\n"
+                            b"Content-Type: image/jpeg\r\n"
+                            b"Cache-Control: no-store\r\n"
+                            b"Content-Length: " + str(len(frame)).encode("ascii") + b"\r\n\r\n"
+                            + frame + b"\r\n"
+                        )
+                finally:
+                    web.camera.stop_external_mjpeg_stream(proc)
+            except web.camera.CameraCaptureError:
+                pass
+            finally:
+                if prewarm_vq is not None:
+                    prewarm_vq.viewer_disconnected()
 
     elif effective_source == web.camera.CAMERA_SOURCE_EXTERNAL:
-        prewarm_vq = None
         stream_url = web.camera.external_stream_url(camera_settings)
         if not stream_url:
             return {"error": "External camera has no stream URL configured."}, 400
@@ -4318,25 +4332,21 @@ def app_api_camera_stream():
         except web.camera.CameraCaptureError as exc:
             return {"error": str(exc)}, 502
 
+        def generate():
+            try:
+                for frame in web.camera.iter_mjpeg_frames(proc):
+                    yield (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n"
+                        b"Cache-Control: no-store\r\n"
+                        b"Content-Length: " + str(len(frame)).encode("ascii") + b"\r\n\r\n"
+                        + frame + b"\r\n"
+                    )
+            finally:
+                web.camera.stop_external_mjpeg_stream(proc)
+
     else:
         return {"error": "No camera source is currently active."}, 400
-
-    boundary = b"frame"
-
-    def generate():
-        try:
-            for frame in web.camera.iter_mjpeg_frames(proc):
-                yield (
-                    b"--" + boundary + b"\r\n"
-                    b"Content-Type: image/jpeg\r\n"
-                    b"Cache-Control: no-store\r\n"
-                    b"Content-Length: " + str(len(frame)).encode("ascii") + b"\r\n\r\n"
-                    + frame + b"\r\n"
-                )
-        finally:
-            web.camera.stop_external_mjpeg_stream(proc)
-            if prewarm_vq is not None:
-                prewarm_vq.viewer_disconnected()
 
     response = Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
     response.headers["Cache-Control"] = "no-store"
