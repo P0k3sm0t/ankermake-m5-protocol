@@ -67,6 +67,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-04-18
+
+### Added
+ - Home Assistant Supervisor addon packaging (`hassio-addon/`) and repository metadata
+ - MJPEG camera stream endpoint for printer cameras, including Home Assistant / Frigate integration support
+ - Automatic Home Assistant MJPEG camera registration
+ - Multi-printer filter for print history
+
+### Changed
+ - Home Assistant MQTT connection is now non-blocking and automatically reconnecting
+ - Snapshot and stream startup path now activates the video session immediately to reduce cold-start delay
+ - Filament page motion speeds were tuned for the current legacy filament flow
+
+### Security
+ - Internal ffmpeg camera access now passes the API key via `X-Api-Key` header instead of URL query parameters, reducing process-list exposure
+ - `/api/camera/stream` now clamps `fps` to a maximum of `30`
+ - Negative `printer_index` values are rejected explicitly
+
+### Fixed
+ - Snapshot and MJPEG stream access now recover correctly from cold-start conditions
+ - MJPEG stream sends headers immediately and prewarms the generator to avoid startup stalls
+ - VideoQueue enable/disable decisions are now synchronized correctly, fixing viewer lifecycle races
+ - Viewer-count underflow is logged instead of being silently hidden
+ - Follow-up test and behavior fixes for video, auth, snapshot, and history flows
+ - Removed the unused `MjpegHub` service that was never wired into the runtime
+
 ## [0.9.0] - 2023-04-17
 
  - First version with github actions for building docker image. (thanks to @cisien)
