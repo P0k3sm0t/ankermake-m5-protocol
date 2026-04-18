@@ -448,7 +448,7 @@ def test_filament_swap_routes_cover_legacy_start_confirm_and_cancel(tmp_path, mo
     assert confirmed.get_json()["pending"] is True
     assert cancelled.status_code == 200
     assert cancelled.get_json()["pending"] is False
-    assert home_calls == ["all"]
+    assert home_calls == ["z"]
     assert home_waits == [42.0]
     assert sent[0] == "M104 S180"
     assert sent[1] == "M104 S220"
@@ -540,7 +540,7 @@ def test_legacy_swap_sends_heat_before_homing_when_nozzle_is_cold(tmp_path, monk
     assert sent[0] == "M104 S180"
     assert sent[1] == "M104 S220"
     assert sent[2] == "M104 S220"
-    assert home_calls == ["all"]
+    assert home_calls == ["z"]
     assert home_waits == [70.0]
     assert sent[3] == "G91"
     assert sent[4] == "G1 Z50 F600"

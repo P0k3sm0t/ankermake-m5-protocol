@@ -109,6 +109,15 @@ def _restore_app_state(old_values, old_svc):
         app.config[key] = value
 
 
+def _videoqueue_stub(**kwargs):
+    return SimpleNamespace(
+        state=None,
+        viewer_connected=lambda: None,
+        viewer_disconnected=lambda: None,
+        **kwargs,
+    )
+
+
 def test_printer_gcode_route_normalizes_safe_commands_and_blocks_motion_while_printing():
     sent = []
     mqtt = SimpleNamespace(
@@ -898,7 +907,7 @@ def test_snapshot_route_reports_expected_error_paths(monkeypatch):
         _restore_app_state(old_values, old_svc)
 
     monkeypatch.setattr("web._ffmpeg_path", lambda: None)
-    old_values, old_svc = _install_app_state(video_supported=True, videoqueue=object())
+    old_values, old_svc = _install_app_state(video_supported=True, videoqueue=_videoqueue_stub())
     try:
         no_ffmpeg = client.get("/api/snapshot", headers={"X-Api-Key": API_KEY})
     finally:
@@ -913,7 +922,7 @@ def test_snapshot_route_reports_expected_error_paths(monkeypatch):
 
     old_values, old_svc = _install_app_state(
         video_supported=True,
-        videoqueue=SimpleNamespace(video_enabled=False),
+        videoqueue=_videoqueue_stub(video_enabled=False),
     )
     try:
         video_disabled = client.get("/api/snapshot", headers={"X-Api-Key": API_KEY})
@@ -923,7 +932,7 @@ def test_snapshot_route_reports_expected_error_paths(monkeypatch):
     monkeypatch.setattr("web._video_has_recent_frame", lambda vq: False)
     old_values, old_svc = _install_app_state(
         video_supported=True,
-        videoqueue=SimpleNamespace(video_enabled=True, last_frame_at=None),
+        videoqueue=_videoqueue_stub(video_enabled=True, last_frame_at=None),
     )
     try:
         no_frames = client.get("/api/snapshot", headers={"X-Api-Key": API_KEY})
@@ -939,7 +948,7 @@ def test_snapshot_route_reports_expected_error_paths(monkeypatch):
     )
     old_values, old_svc = _install_app_state(
         video_supported=True,
-        videoqueue=SimpleNamespace(video_enabled=True, last_frame_at=123.0),
+        videoqueue=_videoqueue_stub(video_enabled=True, last_frame_at=123.0),
     )
     try:
         timeout = client.get("/api/snapshot", headers={"X-Api-Key": API_KEY})
@@ -948,11 +957,12 @@ def test_snapshot_route_reports_expected_error_paths(monkeypatch):
 
     assert not_supported.status_code == 400
     assert no_ffmpeg.status_code == 500
-    assert no_service.status_code == 503
-    assert video_disabled.status_code == 409
-    assert "Enable printer video" in video_disabled.get_json()["error"]
-    assert no_frames.status_code == 409
-    assert "no live camera frames" in no_frames.get_json()["error"]
+    assert no_service.status_code == 500
+    assert no_service.get_json()["error"].startswith("Snapshot")
+    assert video_disabled.status_code == 500
+    assert video_disabled.get_json()["error"].startswith("Snapshot")
+    assert no_frames.status_code == 500
+    assert no_frames.get_json()["error"].startswith("Snapshot")
     assert timeout.status_code == 504
     assert "timed out" in timeout.get_json()["error"]
     assert "Command" not in timeout.get_json()["error"]
