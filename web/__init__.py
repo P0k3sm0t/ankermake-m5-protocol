@@ -4227,24 +4227,31 @@ def app_api_camera_frame():
     return send_file(temp_path, mimetype="image/jpeg", as_attachment=False)
 
 
-def _prewarm_video_service(printer_index, timeout=5.0):
-    """Start the VideoQueue and wait briefly for frames before ffmpeg connects.
-    Prevents HA/Frigate from timing out while PPPP establishes on a cold start."""
-    import time
+def _prewarm_video_service(printer_index, timeout=8.0):
+    """Start the VideoQueue and wait for frames before ffmpeg connects.
+
+    Calls viewer_connected() so _video_requested() returns True immediately,
+    which causes worker_run() to activate the live stream rather than idling.
+    Returns the VideoQueue instance so the caller can release the viewer session
+    via viewer_disconnected() after the capture is complete.
+    """
     vq = get_video_service(printer_index)
     if not vq:
-        return
+        return None
+    vq.viewer_connected()
     if vq.state == RunState.Stopped:
         try:
             vq.start()
             vq.await_ready()
         except Exception:
-            return
+            vq.viewer_disconnected()
+            return None
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if _video_has_recent_frame(vq):
-            return
+            break
         time.sleep(0.15)
+    return vq
 
 
 @app.get("/api/camera/stream")
@@ -4268,10 +4275,10 @@ def app_api_camera_stream():
         if not ffmpeg_path:
             return {"error": "ffmpeg not installed"}, 500
 
-        # Pre-warm the VideoQueue so ffmpeg gets frames immediately on connect,
-        # rather than stalling while PPPP establishes. HA and Frigate time out
-        # quickly if the first MJPEG frame is delayed.
-        _prewarm_video_service(printer_index)
+        # Pre-warm the VideoQueue: viewer_connected() activates _video_requested()
+        # so worker_run() starts the live stream immediately. This cuts cold-start
+        # latency from ~11s to ~3-5s so HA/Frigate don't time out on first connect.
+        prewarm_vq = _prewarm_video_service(printer_index)
 
         # Build internal URL to the raw H.264 stream
         flask_host, flask_port = _local_web_host_port()
@@ -4290,9 +4297,12 @@ def app_api_camera_stream():
                 quality=quality,
             )
         except web.camera.CameraCaptureError as exc:
+            if prewarm_vq is not None:
+                prewarm_vq.viewer_disconnected()
             return {"error": str(exc)}, 502
 
     elif effective_source == web.camera.CAMERA_SOURCE_EXTERNAL:
+        prewarm_vq = None
         stream_url = web.camera.external_stream_url(camera_settings)
         if not stream_url:
             return {"error": "External camera has no stream URL configured."}, 400
@@ -4325,6 +4335,8 @@ def app_api_camera_stream():
                 )
         finally:
             web.camera.stop_external_mjpeg_stream(proc)
+            if prewarm_vq is not None:
+                prewarm_vq.viewer_disconnected()
 
     response = Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
     response.headers["Cache-Control"] = "no-store"
@@ -4343,8 +4355,9 @@ def app_api_snapshot():
     if not camera_settings.get("effective_source"):
         return {"error": camera_settings.get("detail") or "No camera source is available"}, 400
 
+    prewarm_vq = None
     if camera_settings.get("effective_source") == web.camera.CAMERA_SOURCE_PRINTER:
-        _prewarm_video_service(printer_index)
+        prewarm_vq = _prewarm_video_service(printer_index)
 
     try:
         temp_path = _capture_selected_camera_snapshot_temp(
@@ -4361,6 +4374,9 @@ def app_api_snapshot():
         return {"error": str(exc)}, 500
     except OSError as err:
         return {"error": f"Snapshot could not run ffmpeg: {err}"}, 500
+    finally:
+        if prewarm_vq is not None:
+            prewarm_vq.viewer_disconnected()
 
     taken_at = datetime.now()
     with borrow_mqtt(printer_index) as mqtt:
