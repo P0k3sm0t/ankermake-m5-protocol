@@ -430,9 +430,14 @@
     ffmpeg:
       inputs:
         - path: &lt;Stream URL&gt;</pre>
-                                        <p class="mb-1"><strong>Home Assistant generic camera</strong></p>
-                                        <pre class="border rounded p-2 small mb-3 text-body-secondary">still_image_url: &lt;Snapshot URL&gt;
-stream_source: &lt;Stream URL&gt;</pre>
+                                        <p class="mb-1"><strong>Home Assistant</strong></p>
+                                        <p class="mb-2">
+                                            When <code>HA_BASE_URL</code> and <code>HA_TOKEN</code> are set
+                                            (Setup &rarr; HA), ankerctl auto-registers an
+                                            <strong>MJPEG IP Camera</strong> on connect and removes it on stop.
+                                        </p>
+                                        <p class="mb-1 text-body-secondary small">Manual fallback: add via
+                                            <em>MJPEG IP Camera</em> integration using the URLs above.</p>
                                         <p class="mb-0">
                                             When API-key auth is enabled, both URLs include your key automatically. Requires <code>ffmpeg</code>.
                                         </p>
@@ -938,6 +943,31 @@ stream_source: &lt;Stream URL&gt;</pre>
                                                 placeholder="homeassistant" />
                                         </div>
                                     </div>
+
+                                    <hr class="my-3">
+
+                                    <div class="fw-semibold">Home Assistant API (optional)</div>
+                                    <div class="row g-3">
+                                        <div class="col-md-7">
+                                            <label class="form-label" for="ha-api-base-url">HA Base URL</label>
+                                            <input class="form-control" type="text" id="ha-api-base-url"
+                                                placeholder="http://homeassistant.local:8123"
+                                                autocomplete="off" />
+                                        </div>
+                                        <div class="col-md-5">
+                                            <label class="form-label" for="ha-api-token">HA Token</label>
+                                            <input class="form-control" type="password" id="ha-api-token"
+                                                placeholder="Long-lived access token"
+                                                autocomplete="off" />
+                                        </div>
+                                    </div>
+                                    <div class="form-text">
+                                        When set, ankerctl automatically registers an MJPEG IP Camera in
+                                        Home Assistant. Get a token from HA &rarr; Profile &rarr; Long-Lived
+                                        Access Tokens.
+                                    </div>
+                                    <div class="form-text" id="ha-api-status"></div>
+
                                     <button class="btn btn-primary" type="button" id="mqtt-save">Save & Restart
                                         Service</button>
                                     <div class="form-text">Requires restart of MQTT service (automatic). Environment

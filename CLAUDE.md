@@ -248,6 +248,8 @@ HA_MQTT_USER                   # MQTT broker username (optional)
 HA_MQTT_PASSWORD               # MQTT broker password (optional)
 HA_MQTT_DISCOVERY_PREFIX=homeassistant  # HA discovery prefix
 HA_MQTT_TOPIC_PREFIX=ankerctl  # State/command topic prefix
+HA_BASE_URL=http://homeassistant.local:8123  # HA REST API base URL for MJPEG camera auto-registration
+HA_TOKEN=<long-lived-token>                  # HA long-lived access token (Profile → Long-Lived Access Tokens)
 ```
 
 ## Web API Reference

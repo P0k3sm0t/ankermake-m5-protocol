@@ -4413,18 +4413,47 @@ def app_api_snapshot():
 
 @app.get("/api/history")
 def app_api_history():
-    """Return print history as JSON with pagination."""
+    """Return print history as JSON with pagination.
+
+    Query params:
+      filter: "active" (default) | "all" | <integer printer index>
+    """
     printer_index = _requested_printer_index()
     limit = request.args.get("limit", 50, type=int)
     offset = request.args.get("offset", 0, type=int)
-    # Clamp parameters to safe ranges to prevent excessive queries or errors
     limit = max(1, min(limit, 500))
     offset = max(0, offset)
+
+    filter_arg = (request.args.get("filter") or "active").lower()
+    if filter_arg == "all":
+        history_filter = None
+    elif filter_arg == "active":
+        history_filter = printer_index
+    else:
+        try:
+            history_filter = int(filter_arg)
+        except (TypeError, ValueError):
+            history_filter = printer_index
+
+    # Build a name lookup from config so each entry carries a printer_name.
+    printer_names = {}
+    config = app.config.get("config")
+    if config:
+        try:
+            with config.open() as cfg:
+                if cfg:
+                    for i, p in enumerate(cfg.printers):
+                        printer_names[i] = p.name
+        except Exception:
+            pass
+
     with borrow_mqtt(printer_index) as mqtt:
         if not mqtt:
             return {"entries": [], "total": 0}
-        entries = mqtt.history.get_history(limit=limit, offset=offset)
-        total = mqtt.history.get_count()
+        entries = mqtt.history.get_history(
+            limit=limit, offset=offset, printer_index=history_filter
+        )
+        total = mqtt.history.get_count(printer_index=history_filter)
     serialized_entries = []
     for entry in entries:
         item = dict(entry)
@@ -4433,6 +4462,11 @@ def app_api_history():
             if item.get("thumbnail_available")
             else None
         )
+        pi = item.get("printer_index")
+        if pi is not None:
+            item["printer_name"] = printer_names.get(pi, f"Printer {pi}")
+        else:
+            item["printer_name"] = None
         serialized_entries.append(item)
     return {"entries": serialized_entries, "total": total}
 
