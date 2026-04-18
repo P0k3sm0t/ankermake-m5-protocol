@@ -47,7 +47,8 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           flavor: |
             latest=${{ github.event_name == 'push' }}
-          tags: ${{ github.ref_name }}
+          tags: |
+            type=semver,pattern={{version}}
 
       - name: Build and push Docker images
         uses: docker/build-push-action@v7.1.0

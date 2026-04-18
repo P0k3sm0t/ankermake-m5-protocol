@@ -67,6 +67,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.1] - 2026-04-18
+
+### Fixed
+ - HA Supervisor addon now installs correctly: Docker image tags are no longer prefixed with `v` (was `v1.10.0`, now `1.10.0`), matching what Supervisor expects
+ - `hassio-addon/config.yaml` version bumped to `1.10.1` to pick up the fixed image tag
+
 ## [1.10.0] - 2026-04-18
 
 ### Added
