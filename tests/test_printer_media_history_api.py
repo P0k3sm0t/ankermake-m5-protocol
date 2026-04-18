@@ -449,7 +449,7 @@ def test_history_routes_require_auth_and_clear_entries():
             or [{"id": 1, "filename": "cube.gcode", "thumbnail_available": False, "printer_index": printer_index}]
         ),
         get_count=lambda printer_index=None: calls.append(("count", printer_index)) or 3,
-        clear=lambda: calls.append(("clear",)),
+        clear=lambda printer_index=None: calls.append(("clear", printer_index)),
     )
     mqtt = SimpleNamespace(history=history)
     client = app.test_client()
@@ -467,7 +467,43 @@ def test_history_routes_require_auth_and_clear_entries():
     assert authorized.get_json()["total"] == 3
     assert authorized.get_json()["entries"][0]["thumbnail_url"] is None
     assert cleared.status_code == 200
-    assert calls == [("get", 500, 0, 0), ("count", 0), ("clear",)]
+    assert calls == [("get", 500, 0, 0), ("count", 0), ("clear", 0)]
+
+
+def test_history_clear_route_respects_filter_scope():
+    clear_calls = []
+    history = SimpleNamespace(
+        get_history=lambda limit, offset, printer_index=None: [],
+        get_count=lambda printer_index=None: 0,
+        clear=lambda printer_index=None: clear_calls.append(printer_index),
+    )
+    cfg = _base_config()
+    cfg.printers = [
+        _printer(sn="SN0", name="Thing 1"),
+        _printer(sn="SN1", name="Thing 2"),
+    ]
+    services = FakeServices()
+    services._services = {
+        "mqttqueue:0": SimpleNamespace(history=history),
+        "mqttqueue:1": SimpleNamespace(history=history),
+    }
+    services.svcs = dict(services._services)
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(config=cfg)
+    app.config["printer_index"] = 1
+    app.svc = services
+
+    try:
+        active = client.delete("/api/history", headers={"X-Api-Key": API_KEY})
+        specific = client.delete("/api/history?filter=0", headers={"X-Api-Key": API_KEY})
+        all_printers = client.delete("/api/history?filter=all", headers={"X-Api-Key": API_KEY})
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert active.status_code == 200
+    assert specific.status_code == 200
+    assert all_printers.status_code == 200
+    assert clear_calls == [1, 0, None]
 
 
 def test_history_route_uses_requested_or_active_indexed_mqtt_service():
@@ -651,6 +687,64 @@ def test_history_reprint_route_dispatches_archived_upload_and_validates_busy(tmp
     args, kwargs = upload_calls[0]
     assert args[1] == "cube.gcode"
     assert kwargs["start_print"] is True
+    assert kwargs["archive_info"]["archive_relpath"] == archive_info["archive_relpath"]
+
+
+def test_history_reprint_route_respects_requested_printer_index(tmp_path):
+    cfg = _base_config()
+    cfg.printers = [
+        _printer(sn="SN0", name="Thing 1"),
+        _printer(sn="SN1", name="Thing 2"),
+    ]
+    db_path = tmp_path / "history.db"
+    history0 = PrintHistory(db_path=db_path, printer_index=0)
+    history1 = PrintHistory(db_path=db_path, printer_index=1)
+    archive_info = history1.archive_upload("thing2.gcode", b"G28\nM104 S205\n")
+    entry_id = history1.record_start(
+        "thing2.gcode",
+        archive_relpath=archive_info["archive_relpath"],
+        archive_size=archive_info["archive_size"],
+    )
+    history1.record_finish(filename="thing2.gcode")
+
+    upload_calls = []
+    services = FakeServices()
+    services._services = {
+        "mqttqueue:0": SimpleNamespace(
+            is_printing=False,
+            has_pending_print_start=False,
+            is_preparing_print=False,
+            history=history0,
+        ),
+        "mqttqueue:1": SimpleNamespace(
+            is_printing=False,
+            has_pending_print_start=False,
+            is_preparing_print=False,
+            history=history1,
+        ),
+        "filetransfer": SimpleNamespace(
+            send_bytes=lambda *args, **kwargs: upload_calls.append((args, kwargs)),
+        ),
+    }
+    services.svcs = dict(services._services)
+
+    client = app.test_client()
+    old_values, old_svc = _install_app_state(config=cfg)
+    app.config["printer_index"] = 0
+    app.svc = services
+
+    try:
+        response = client.post(
+            f"/api/history/{entry_id}/reprint?printer_index=1",
+            headers={"X-Api-Key": API_KEY},
+        )
+    finally:
+        _restore_app_state(old_values, old_svc)
+
+    assert response.status_code == 200
+    assert len(upload_calls) == 1
+    _, kwargs = upload_calls[0]
+    assert kwargs["printer_index"] == 1
     assert kwargs["archive_info"]["archive_relpath"] == archive_info["archive_relpath"]
 
 

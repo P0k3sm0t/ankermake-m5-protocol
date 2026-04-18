@@ -135,6 +135,44 @@ def test_history_clear_and_fallback_finish_latest_active(tmp_path):
     assert history.get_count() == 0
 
 
+def test_printer_scoped_history_includes_legacy_rows_in_view_and_count(tmp_path):
+    db_path = tmp_path / "history.db"
+    legacy_history = PrintHistory(db_path=db_path)
+    history0 = PrintHistory(db_path=db_path, printer_index=0)
+    history1 = PrintHistory(db_path=db_path, printer_index=1)
+
+    legacy_id = legacy_history.record_start("legacy.gcode", task_id="legacy-task")
+    row0_id = history0.record_start("thing1.gcode", task_id="thing1-task")
+    history1.record_start("thing2.gcode", task_id="thing2-task")
+
+    entries = history0.get_history(limit=10, printer_index=0)
+
+    assert [entry["id"] for entry in entries] == [row0_id, legacy_id]
+    assert [entry["filename"] for entry in entries] == ["thing1.gcode", "legacy.gcode"]
+    assert history0.get_count(printer_index=0) == 2
+
+
+def test_printer_scoped_clear_preserves_other_printers_and_legacy_rows(tmp_path):
+    db_path = tmp_path / "history.db"
+    legacy_history = PrintHistory(db_path=db_path)
+    history0 = PrintHistory(db_path=db_path, printer_index=0)
+    history1 = PrintHistory(db_path=db_path, printer_index=1)
+
+    legacy_id = legacy_history.record_start("legacy.gcode", task_id="legacy-task")
+    row0_id = history0.record_start("thing1.gcode", task_id="thing1-task")
+    row1_id = history1.record_start("thing2.gcode", task_id="thing2-task")
+    legacy_history.record_finish(task_id="legacy-task", progress=100)
+    history0.record_finish(task_id="thing1-task", progress=100)
+    history1.record_finish(task_id="thing2-task", progress=100)
+
+    history0.clear(printer_index=0)
+
+    assert history0.get_entry(row0_id) is None
+    assert history0.get_entry(row1_id) is not None
+    assert history0.get_entry(legacy_id) is not None
+    assert history0.get_count(printer_index=0) == 1
+
+
 def test_archive_upload_and_reprint_flags(tmp_path):
     history = PrintHistory(db_path=tmp_path / "history.db")
 
