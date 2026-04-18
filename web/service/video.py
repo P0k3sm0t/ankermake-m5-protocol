@@ -732,7 +732,10 @@ class VideoQueue(Service):
             if self._viewer_count > 0:
                 self._viewer_count -= 1
             else:
-                self._viewer_count = 0
+                log.warning(
+                    "%s: viewer_disconnected called with viewer_count already 0 — likely a lifecycle pairing bug",
+                    self.name,
+                )
             viewer_count = self._viewer_count
             if viewer_count == 0 and self._pending_disable:
                 log.info("%s: last viewer disconnected; clearing stale deferred disable", self.name)
@@ -746,29 +749,37 @@ class VideoQueue(Service):
 
     def set_video_enabled(self, enabled):
         enabled = bool(enabled)
-        if enabled:
-            self._pending_disable = False
-            was_enabled = bool(getattr(self, "video_enabled", False))
-            self.video_enabled = True
-            self._sync_persistent_state()
-            if not was_enabled:
-                self._enable_generation += 1
-            if self.state == RunState.Stopped:
-                self.start()
-            elif not self.wanted:
-                self.start()
-            return True
+        should_start = False
+        should_stop_if_unrequested = False
+        with self._lock:
+            if enabled:
+                self._pending_disable = False
+                was_enabled = bool(getattr(self, "video_enabled", False))
+                self.video_enabled = True
+                self._sync_persistent_state()
+                if not was_enabled:
+                    self._enable_generation += 1
+                if self.state == RunState.Stopped or not self.wanted:
+                    should_start = True
+            else:
+                was_enabled = bool(getattr(self, "video_enabled", False))
+                self.video_enabled = False
+                self._sync_persistent_state()
+                if self._video_requested():
+                    if was_enabled and self._viewer_count > 0:
+                        log.info(
+                            "%s: live view disabled; keeping stream active for timelapse",
+                            self.name,
+                        )
+                elif was_enabled or self._pending_disable:
+                    should_stop_if_unrequested = True
 
-        was_enabled = bool(getattr(self, "video_enabled", False))
-        self.video_enabled = False
-        self._sync_persistent_state()
-        if self._video_requested():
-            if was_enabled and self._viewer_count > 0:
-                log.info("%s: live view disabled; keeping stream active for timelapse", self.name)
+        if should_start:
+            self.start()
             return True
-        if not was_enabled and not self._pending_disable:
-            return True
-        return self._stop_if_unrequested()
+        if should_stop_if_unrequested:
+            return self._stop_if_unrequested()
+        return True
 
     def set_timelapse_enabled(self, enabled):
         enabled = bool(enabled)

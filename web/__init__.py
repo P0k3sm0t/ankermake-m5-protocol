@@ -4179,16 +4179,19 @@ def _capture_selected_camera_snapshot_temp(camera_settings, *, scale=None, for_t
 
     temp_path = web.camera.create_temp_snapshot_file()
     host, port = _local_web_host_port()
+    api_key = app.config.get("api_key")
+    extra_headers = f"X-Api-Key: {api_key}\r\n" if api_key else None
     web.camera.capture_camera_snapshot_to_file(
         camera_settings,
         ffmpeg_path,
         temp_path,
         host=host,
         port=port,
-        api_key=app.config.get("api_key"),
+        api_key=api_key,
         timeout=SNAPSHOT_FFMPEG_TIMEOUT_SEC,
         for_timelapse=for_timelapse,
         scale=scale,
+        extra_headers=extra_headers,
     )
     return temp_path
 
@@ -4264,7 +4267,7 @@ def app_api_camera_stream():
     fps_raw = request.args.get("fps", None)
     quality_raw = request.args.get("quality", "5")
     try:
-        fps = int(fps_raw) if fps_raw is not None else None
+        fps = max(1, min(30, int(fps_raw))) if fps_raw is not None else None
         quality = max(1, min(31, int(quality_raw)))
     except (TypeError, ValueError):
         fps = None
@@ -4289,8 +4292,7 @@ def app_api_camera_stream():
                 f"http://{flask_host}:{flask_port}/video"
                 f"?for_timelapse=1&printer_index={printer_index}"
             )
-            if api_key:
-                video_url += f"&apikey={api_key}"
+            extra_headers = f"X-Api-Key: {api_key}\r\n" if api_key else None
             try:
                 proc = web.camera.open_printer_mjpeg_stream(
                     ffmpeg_path,
@@ -4298,6 +4300,7 @@ def app_api_camera_stream():
                     fps=fps or 5,
                     scale=(1280, 720),
                     quality=quality,
+                    extra_headers=extra_headers,
                 )
                 try:
                     for frame in web.camera.iter_mjpeg_frames(proc):

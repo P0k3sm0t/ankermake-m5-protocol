@@ -338,14 +338,19 @@ def open_external_mjpeg_stream(ffmpeg_path, input_url, *, scale=None):
         raise CameraCaptureError(f"External camera stream could not start ffmpeg: {exc}") from exc
 
 
-def open_printer_mjpeg_stream(ffmpeg_path, video_url, *, fps=5, scale=None, quality=5):
+def open_printer_mjpeg_stream(ffmpeg_path, video_url, *, fps=5, scale=None, quality=5, extra_headers: str | None = None):
     """Open an MJPEG stream by transcoding the printer's raw H.264 /video endpoint."""
     cmd = [
         ffmpeg_path, "-loglevel", "error", "-nostdin",
-        "-f", "h264", "-i", video_url,
+        "-f", "h264",
+    ]
+    if extra_headers:
+        cmd.extend(["-headers", extra_headers])
+    cmd.extend([
+        "-i", video_url,
         "-an", "-sn", "-dn",
         "-r", str(fps),
-    ]
+    ])
     vf = _mjpeg_filter(scale)
     if vf:
         cmd.extend(["-vf", vf])
@@ -453,13 +458,14 @@ def capture_camera_snapshot_to_file(
     timeout=30,
     for_timelapse=False,
     scale=None,
+    extra_headers: str | None = None,
 ):
     effective_source = (camera_settings or {}).get("effective_source")
     if effective_source == CAMERA_SOURCE_PRINTER:
         input_url = build_printer_video_url(
             host,
             port,
-            api_key,
+            None if extra_headers else api_key,
             for_timelapse=for_timelapse,
             printer_index=(camera_settings or {}).get("printer_index"),
         )
@@ -468,6 +474,7 @@ def capture_camera_snapshot_to_file(
             input_url,
             output_path,
             timeout=timeout,
+            input_args=["-headers", extra_headers] if extra_headers else None,
             format_hint="h264",
             scale=scale,
         )

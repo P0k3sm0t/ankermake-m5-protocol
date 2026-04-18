@@ -1,3 +1,5 @@
+import threading
+
 from contextlib import contextmanager
 from datetime import datetime
 from threading import Event, Lock
@@ -76,6 +78,7 @@ class FakeFD:
 
 def test_video_queue_worker_start_stop_and_handler(monkeypatch):
     queue = object.__new__(VideoQueue)
+    queue._lock = threading.Lock()
     queue.video_enabled = True
     queue.wanted = True
     queue.handlers = []
@@ -145,6 +148,7 @@ def test_video_queue_worker_start_stop_and_handler(monkeypatch):
 
 def test_video_queue_worker_run_detects_disconnect_api_swap_and_stall(monkeypatch):
     queue = object.__new__(VideoQueue)
+    queue._lock = threading.Lock()
     queue.video_enabled = True
     queue.wanted = True
     queue.handlers = [lambda _: None]
@@ -187,6 +191,7 @@ def test_video_queue_worker_run_detects_disconnect_api_swap_and_stall(monkeypatc
 
 def test_video_queue_timelapse_only_mode_still_recovers_stalled_video(monkeypatch):
     queue = object.__new__(VideoQueue)
+    queue._lock = threading.Lock()
     queue.video_enabled = False
     queue.timelapse_enabled = True
     queue.wanted = True
@@ -223,7 +228,9 @@ def test_video_queue_timelapse_only_mode_still_recovers_stalled_video(monkeypatc
 
 
 def test_video_queue_disable_cancels_recovery_with_connected_viewer():
+    import threading
     queue = object.__new__(VideoQueue)
+    queue._lock = threading.Lock()
     queue.video_enabled = True
     queue.timelapse_enabled = False
     queue.wanted = True
@@ -272,6 +279,7 @@ def test_video_queue_disable_cancels_recovery_with_connected_viewer():
 
 def test_video_queue_disable_live_view_keeps_timelapse_stream_running():
     queue = object.__new__(VideoQueue)
+    queue._lock = threading.Lock()
     queue.video_enabled = True
     queue.timelapse_enabled = True
     queue.wanted = True
@@ -304,6 +312,7 @@ def test_video_queue_disable_live_view_keeps_timelapse_stream_running():
 
 def test_video_queue_release_timelapse_hold_only_stops_without_other_requesters():
     queue = object.__new__(VideoQueue)
+    queue._lock = threading.Lock()
     queue.video_enabled = False
     queue.timelapse_enabled = True
     queue.wanted = True
@@ -354,6 +363,7 @@ def test_video_queue_release_timelapse_hold_only_stops_without_other_requesters(
 
 def test_video_queue_request_live_recovery_sets_worker_flag(monkeypatch):
     queue = object.__new__(VideoQueue)
+    queue._lock = threading.Lock()
     queue.video_enabled = True
     queue.timelapse_enabled = False
     queue.wanted = True
@@ -375,6 +385,7 @@ def test_video_queue_request_live_recovery_sets_worker_flag(monkeypatch):
 
 def test_video_queue_worker_run_honors_manual_recovery_request(monkeypatch):
     queue = object.__new__(VideoQueue)
+    queue._lock = threading.Lock()
     queue.video_enabled = True
     queue.timelapse_enabled = False
     queue.wanted = True
@@ -414,6 +425,7 @@ def test_video_queue_worker_run_honors_manual_recovery_request(monkeypatch):
 
 def test_video_queue_api_profile_and_mode_validation():
     queue = object.__new__(VideoQueue)
+    queue._lock = threading.Lock()
     queue.pppp = None
     queue.saved_video_mode = None
     queue.saved_video_profile_id = None
