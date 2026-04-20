@@ -57,4 +57,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD python3 -c "import urllib.request, os; h=os.getenv('FLASK_HOST','127.0.0.1'); h='127.0.0.1' if h in ('0.0.0.0','::','') else h; urllib.request.urlopen('http://'+h+':'+os.getenv('FLASK_PORT','4470')+'/api/health',timeout=4)" 2>/dev/null || exit 1
 
 ENTRYPOINT ["/app/entrypoint.sh"]
-CMD ["/app/ankerctl.py", "webserver", "run"]
+CMD ["/app/ankerctl.py", "webserver", "run", "--host", "0.0.0.0"]
