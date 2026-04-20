@@ -3279,6 +3279,9 @@ $(function () {
         }
     }
 
+    window._dbg = window._dbg || {};
+    window._dbg.applyCameraSettings = applyCameraSettingsToForm;
+
     async function loadCameraSettings() {
         if (_cameraSettingsLoading) {
             return;
@@ -5933,6 +5936,24 @@ $(function () {
                 if (!text) return;
                 const ok = execFallback(text);
                 showResult(ok, "execCommand (forced fallback)");
+            });
+
+            const camResultEl = document.getElementById("dbg-cam-fake-result");
+            const host = window.location.host;
+
+            document.getElementById("dbg-cam-fake-printer-only")?.addEventListener("click", function () {
+                window._dbg.applyCameraSettings({ integration: { enabled: true, stream_url: "http://" + host + "/api/camera/stream", snapshot_url: "http://" + host + "/api/snapshot", api_key_required: false } });
+                if (camResultEl) camResultEl.innerHTML = "<span class=\"text-success\">Simulated: printer-only. Check Setup \u2192 Camera for a single Stream URL.</span>";
+            });
+
+            document.getElementById("dbg-cam-fake-both")?.addEventListener("click", function () {
+                window._dbg.applyCameraSettings({ integration: { enabled: true, stream_url: "http://" + host + "/api/camera/stream", snapshot_url: "http://" + host + "/api/snapshot", printer_stream_url: "http://" + host + "/api/camera/stream?source=printer", external_stream_url: "http://" + host + "/api/camera/stream?source=external", api_key_required: false } });
+                if (camResultEl) camResultEl.innerHTML = "<span class=\"text-success\">Simulated: printer + external. Check Setup \u2192 Camera for both source URLs.</span>";
+            });
+
+            document.getElementById("dbg-cam-fake-clear")?.addEventListener("click", function () {
+                window._dbg.applyCameraSettings({});
+                if (camResultEl) camResultEl.textContent = "";
             });
         })();
 
