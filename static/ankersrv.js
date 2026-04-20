@@ -3360,14 +3360,19 @@ $(function () {
             flash_message("No URL to copy. Enable the integration stream and save first.", "warning");
             return;
         }
-        navigator.clipboard.writeText(url).then(
-            () => flash_message(`${label} copied to clipboard.`, "success"),
-            () => {
-                const el = document.getElementById(inputId);
-                if (el) { el.select(); document.execCommand("copy"); }
-                flash_message("URL selected — press Ctrl+C to copy.", "info");
-            }
-        );
+        const fallback = () => {
+            const el = document.getElementById(inputId);
+            if (el) { el.select(); document.execCommand("copy"); }
+            flash_message("URL selected — press Ctrl+C to copy.", "info");
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(url).then(
+                () => flash_message(`${label} copied to clipboard.`, "success"),
+                fallback
+            );
+        } else {
+            fallback();
+        }
     }
 
     $("#camera-integration-copy-stream").on("click", function () {
@@ -5870,6 +5875,66 @@ $(function () {
                 if (btn) btn.disabled = false;
             }
         }
+
+        // ------------------------------------------------------------------
+        // Browser capabilities panel
+        // ------------------------------------------------------------------
+        (function () {
+            const statusBadge = document.getElementById("dbg-clipboard-status");
+            const statusDetail = document.getElementById("dbg-clipboard-detail");
+            const resultEl = document.getElementById("dbg-clipboard-copy-result");
+
+            if (!statusBadge) return;
+
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                statusBadge.className = "badge bg-success";
+                statusBadge.textContent = "Available";
+                statusDetail.textContent = "navigator.clipboard.writeText is supported";
+            } else {
+                statusBadge.className = "badge bg-warning text-dark";
+                statusBadge.textContent = "Not available";
+                statusDetail.textContent = "navigator.clipboard is undefined — copy buttons use execCommand fallback";
+            }
+
+            function showResult(ok, method) {
+                if (!resultEl) return;
+                resultEl.innerHTML = ok
+                    ? `<span class="text-success">Copied via <strong>${escapeHtml(method)}</strong> — paste somewhere to verify.</span>`
+                    : `<span class="text-danger">Copy failed via <strong>${escapeHtml(method)}</strong>.</span>`;
+            }
+
+            function execFallback(text) {
+                const tmp = document.createElement("textarea");
+                tmp.value = text;
+                tmp.style.cssText = "position:fixed;opacity:0";
+                document.body.appendChild(tmp);
+                tmp.select();
+                const ok = document.execCommand("copy");
+                document.body.removeChild(tmp);
+                return ok;
+            }
+
+            document.getElementById("dbg-clipboard-copy-native").addEventListener("click", function () {
+                const text = document.getElementById("dbg-clipboard-test-input").value.trim();
+                if (!text) return;
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(text).then(
+                        () => showResult(true, "navigator.clipboard"),
+                        () => showResult(false, "navigator.clipboard")
+                    );
+                } else {
+                    const ok = execFallback(text);
+                    showResult(ok, "execCommand (auto-fallback — clipboard API unavailable)");
+                }
+            });
+
+            document.getElementById("dbg-clipboard-copy-fallback").addEventListener("click", function () {
+                const text = document.getElementById("dbg-clipboard-test-input").value.trim();
+                if (!text) return;
+                const ok = execFallback(text);
+                showResult(ok, "execCommand (forced fallback)");
+            });
+        })();
 
     } // end debug tab block
 

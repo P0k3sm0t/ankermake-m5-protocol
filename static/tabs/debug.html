@@ -42,6 +42,12 @@
                             {{ macro.bi_icon("journal-text") }} Logs
                         </button>
                     </li>
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link" id="dbg-browser-tab" data-bs-toggle="pill"
+                            data-bs-target="#dbg-browser" type="button" role="tab">
+                            {{ macro.bi_icon("clipboard-check") }} Browser
+                        </button>
+                    </li>
                 </ul>
 
                 <div class="tab-content" id="debugSectionContent">
@@ -269,6 +275,54 @@
                                 <pre class="bg-dark text-light p-2 border rounded"
                                     style="height: 400px; min-height: 150px; overflow: auto; font-size: 0.8em; resize: vertical;"
                                     id="dbg-log-pre"><code id="dbg-log-content">...</code></pre>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- ====== Browser ====== -->
+                    <div class="tab-pane fade" id="dbg-browser" role="tabpanel">
+                        <div class="card border-secondary">
+                            <div class="card-header">{{ macro.bi_icon("clipboard-check") }} Browser Capabilities</div>
+                            <div class="card-body vstack gap-4">
+
+                                <!-- Clipboard API status -->
+                                <div>
+                                    <h6 class="text-muted small mb-2">Clipboard API</h6>
+                                    <div class="d-flex align-items-center gap-2">
+                                        <span id="dbg-clipboard-status" class="badge">Checking…</span>
+                                        <span class="text-muted small" id="dbg-clipboard-detail"></span>
+                                    </div>
+                                    <div class="form-text mt-1">
+                                        <code>navigator.clipboard</code> requires a secure context (HTTPS or localhost).
+                                        On plain HTTP the copy buttons fall back to <code>execCommand("copy")</code>.
+                                    </div>
+                                </div>
+
+                                <hr class="my-0">
+
+                                <!-- Copy test -->
+                                <div>
+                                    <h6 class="text-muted small mb-2">Copy Button Test</h6>
+                                    <div class="row g-2 align-items-center">
+                                        <div class="col">
+                                            <input type="text" class="form-control font-monospace"
+                                                id="dbg-clipboard-test-input"
+                                                value="http://192.168.1.24:4470/api/camera/stream?source=printer">
+                                        </div>
+                                        <div class="col-auto">
+                                            <div class="input-group">
+                                                <button class="btn btn-outline-primary" id="dbg-clipboard-copy-native" title="Copy via navigator.clipboard (native path)">
+                                                    {{ macro.bi_icon("clipboard") }} Copy (native)
+                                                </button>
+                                                <button class="btn btn-outline-secondary" id="dbg-clipboard-copy-fallback" title="Copy via execCommand fallback (simulates HTTP context)">
+                                                    {{ macro.bi_icon("clipboard-x") }} Force fallback
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="form-text mt-1" id="dbg-clipboard-copy-result"></div>
+                                </div>
+
                             </div>
                         </div>
                     </div>
