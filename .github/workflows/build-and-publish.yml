@@ -109,7 +109,7 @@ jobs:
         with:
           context: hassio-addon
           file: hassio-addon/Dockerfile
-          build-args: BUILD_FROM=${{ env.REGISTRY }}/${{ env.IMAGE_NAME | lower }}:${{ steps.version.outputs.tag }}
+          build-args: BUILD_FROM=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.tag }}
           platforms: linux/arm/v7,linux/arm64,linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
