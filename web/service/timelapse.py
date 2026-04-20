@@ -53,7 +53,12 @@ class TimelapseService:
             initial_captures_dir
         )
         self._printer_scope = self._resolve_printer_scope()
-        os.makedirs(self._captures_dir, exist_ok=True)
+        try:
+            os.makedirs(self._captures_dir, exist_ok=True)
+        except PermissionError as err:
+            log.warning(f"Timelapse: cannot create captures dir {self._captures_dir!r}: {err} — falling back to config dir")
+            self._captures_dir = os.path.join(str(config_manager.config_root), "captures")
+            os.makedirs(self._captures_dir, exist_ok=True)
 
         self._lock = threading.Lock()
         self._capture_thread = None

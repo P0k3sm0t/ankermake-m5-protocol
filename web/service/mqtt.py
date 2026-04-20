@@ -117,7 +117,11 @@ class MqttQueue(Service):
             db_path=f"{config_root}/history.db",
             printer_index=self.printer_index,
         )
-        self._timelapse = TimelapseService(app.config["config"], printer_index=self.printer_index)
+        try:
+            self._timelapse = TimelapseService(app.config["config"], printer_index=self.printer_index)
+        except Exception as err:
+            log.error(f"TimelapseService init failed, timelapse disabled: {err}", exc_info=True)
+            self._timelapse = None
 
         # Home Assistant MQTT Discovery
         printer_sn = None
@@ -229,7 +233,8 @@ class MqttQueue(Service):
         """Record a print failure: history, timelapse, HA state, and notification event."""
         self._remember_recent_completion()
         self._history.record_fail(filename=self._last_filename, reason=reason, task_id=self._last_task_id)
-        self._timelapse.fail_capture()
+        if self._timelapse:
+            self._timelapse.fail_capture()
         self._ha.update_state(print_status="failed")
         self._send_event(
             EVENT_PRINT_FAILED,
@@ -1338,7 +1343,8 @@ class MqttQueue(Service):
                         self._record_print_complete_alert()
                         self._remember_recent_completion()
                         self._history.record_finish(filename=self._last_filename, task_id=self._last_task_id)
-                        self._timelapse.finish_capture(final=True)
+                        if self._timelapse:
+                            self._timelapse.finish_capture(final=True)
                         self._ha.update_state(print_status="complete", print_progress=100)
                         self._send_event(
                             EVENT_PRINT_FINISHED,
@@ -1481,7 +1487,8 @@ class MqttQueue(Service):
                 )
                 self._remember_recent_completion()
                 self._history.record_finish(filename=self._last_filename, task_id=self._last_task_id)
-                self._timelapse.finish_capture(final=True)
+                if self._timelapse:
+                    self._timelapse.finish_capture(final=True)
                 self._ha.update_state(print_status="complete", print_progress=100)
                 self._reset_print_state()
                 return
@@ -1495,7 +1502,8 @@ class MqttQueue(Service):
             )
             self._remember_recent_completion()
             self._history.record_finish(filename=self._last_filename, task_id=self._last_task_id)
-            self._timelapse.finish_capture(final=True)
+            if self._timelapse:
+                self._timelapse.finish_capture(final=True)
             self._ha.update_state(print_status="complete", print_progress=100)
             self._reset_print_state()
             return
