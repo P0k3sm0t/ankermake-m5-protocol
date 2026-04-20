@@ -5942,13 +5942,18 @@ $(function () {
             const host = window.location.host;
 
             document.getElementById("dbg-cam-fake-printer-only")?.addEventListener("click", function () {
-                window._dbg.applyCameraSettings({ integration: { enabled: true, stream_url: "http://" + host + "/api/camera/stream", snapshot_url: "http://" + host + "/api/snapshot", api_key_required: false } });
-                if (camResultEl) camResultEl.innerHTML = "<span class=\"text-success\">Simulated: printer-only. Check Setup \u2192 Camera for a single Stream URL.</span>";
+                const pi = getActivePrinterIndex();
+                const base = "http://" + host;
+                window._dbg.applyCameraSettings({ integration: { enabled: true, stream_url: base + "/api/camera/stream?printer_index=" + pi, snapshot_url: base + "/api/snapshot?printer_index=" + pi, api_key_required: false } });
+                if (camResultEl) camResultEl.innerHTML = "<span class=\"text-success\">Simulated printer-only (printer_index=" + pi + "). Check Setup \u2192 Camera for a single Stream URL.</span>";
             });
 
             document.getElementById("dbg-cam-fake-both")?.addEventListener("click", function () {
-                window._dbg.applyCameraSettings({ integration: { enabled: true, stream_url: "http://" + host + "/api/camera/stream", snapshot_url: "http://" + host + "/api/snapshot", printer_stream_url: "http://" + host + "/api/camera/stream?source=printer", external_stream_url: "http://" + host + "/api/camera/stream?source=external", api_key_required: false } });
-                if (camResultEl) camResultEl.innerHTML = "<span class=\"text-success\">Simulated: printer + external. Check Setup \u2192 Camera for both source URLs.</span>";
+                const pi = getActivePrinterIndex();
+                const base = "http://" + host;
+                const q = "?printer_index=" + pi;
+                window._dbg.applyCameraSettings({ integration: { enabled: true, stream_url: base + "/api/camera/stream" + q, snapshot_url: base + "/api/snapshot" + q, printer_stream_url: base + "/api/camera/stream" + q + "&source=printer", external_stream_url: base + "/api/camera/stream" + q + "&source=external", api_key_required: false } });
+                if (camResultEl) camResultEl.innerHTML = "<span class=\"text-success\">Simulated printer + external (printer_index=" + pi + "). Check Setup \u2192 Camera for both source URLs.</span>";
             });
 
             document.getElementById("dbg-cam-fake-clear")?.addEventListener("click", function () {
