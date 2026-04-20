@@ -37,6 +37,9 @@ print('true' if val else 'false')
 # Ensure persistent storage directories exist and are writable
 # ------------------------------------------------------------------
 mkdir -p /data/.config/ankerctl
+mkdir -p /home/ankerctl/.config
+rm -rf /home/ankerctl/.config/ankerctl
+ln -sfn /data/.config/ankerctl /home/ankerctl/.config/ankerctl
 mkdir -p /data/captures
 mkdir -p /data/logs
 chown -R ankerctl:ankerctl /data

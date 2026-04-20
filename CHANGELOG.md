@@ -67,6 +67,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.6] - 2026-04-20
+
+### Fixed
+ - HA addon: fix config persistence on restart by symlinking `/home/ankerctl/.config/ankerctl` to `/data/.config/ankerctl`, keeping `default.json` and related SQLite state under the Supervisor-managed persistent volume
+
 ## [1.10.5] - 2026-04-20
 
 ### Fixed
