@@ -67,6 +67,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.2] - 2026-04-20
+
+### Fixed
+ - HA Supervised addon: server no longer binds to 127.0.0.1 — Docker CMD now explicitly passes `--host 0.0.0.0`
+ - HA Supervised addon: dedicated HA image (`ankermake-m5-protocol-ha`) is now built and published by CI, ensuring `run.sh` runs as entrypoint and addon options (FLASK_HOST etc.) are applied correctly
+
 ## [1.10.1] - 2026-04-18
 
 ### Fixed
