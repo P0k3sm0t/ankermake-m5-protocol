@@ -12,7 +12,7 @@ arch:
 host_network: true
 
 # Pull the pre-built multi-arch image from GHCR
-image: ghcr.io/django1982/ankermake-m5-protocol
+image: ghcr.io/django1982/ankermake-m5-protocol-ha
 
 # Persistent config storage (maps to /data inside the addon container)
 map:
