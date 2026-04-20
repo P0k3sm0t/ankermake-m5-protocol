@@ -67,6 +67,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.3] - 2026-04-20
+
+### Fixed
+ - HA Supervisor addon CI: BUILD_FROM image name is now lowercased before passing to Docker (GitHub repository name has uppercase owner which Docker rejects)
+
 ## [1.10.2] - 2026-04-20
 
 ### Fixed
