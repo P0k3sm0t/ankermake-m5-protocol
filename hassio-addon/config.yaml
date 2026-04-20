@@ -1,5 +1,5 @@
 name: ankerctl
-version: "1.10.4"
+version: "1.10.5"
 slug: ankerctl
 description: Web UI and control interface for AnkerMake M5 3D printers
 url: https://github.com/Django1982/ankermake-m5-protocol
@@ -10,6 +10,9 @@ arch:
 
 # PPPP uses asymmetric UDP — bridge networking breaks it
 host_network: true
+
+# Required for PPPP UDP LAN discovery (AppArmor otherwise blocks raw UDP broadcast)
+full_access: true
 
 # Pull the pre-built multi-arch image from GHCR
 image: ghcr.io/django1982/ankermake-m5-protocol-ha

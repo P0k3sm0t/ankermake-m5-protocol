@@ -67,6 +67,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.5] - 2026-04-20
+
+### Fixed
+ - HA Supervised addon: add `full_access: true` so AppArmor does not block PPPP UDP LAN discovery — without it the printer IP is never found and camera/video/file-transfer do not work
+
 ## [1.10.4] - 2026-04-20
 
 ### Fixed
