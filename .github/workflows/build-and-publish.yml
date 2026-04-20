@@ -100,16 +100,18 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
 
-      - name: Extract semver tag for BUILD_FROM
+      - name: Extract semver tag and lowercase image name for BUILD_FROM
         id: version
-        run: echo "tag=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+        run: |
+          echo "tag=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+          echo "image_lc=$(echo '${{ env.IMAGE_NAME }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
 
       - name: Build and push HA Supervisor addon image
         uses: docker/build-push-action@v7.1.0
         with:
           context: hassio-addon
           file: hassio-addon/Dockerfile
-          build-args: BUILD_FROM=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.tag }}
+          build-args: BUILD_FROM=${{ env.REGISTRY }}/${{ steps.version.outputs.image_lc }}:${{ steps.version.outputs.tag }}
           platforms: linux/arm/v7,linux/arm64,linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
