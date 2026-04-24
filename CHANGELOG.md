@@ -67,6 +67,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.7] - 2026-04-24
+
+### Fixed
+ - HA MQTT: service no longer permanently disabled when the broker is unreachable at container startup — `OSError` from `connect_async` now falls through to `loop_start()` so paho's background thread retries automatically
+ - HA MQTT: `reload_config()` now calls `start()` when the service is enabled but the client is not running (was `pass`), so a manual settings save can recover a dead HA connection
+ - HA MQTT: removed redundant `start()` call in `MqttQueue.worker_init()` that caused a double-connect with the same `client_id`, kicking the first connection in a reconnect loop
+
 ## [1.10.6] - 2026-04-20
 
 ### Fixed
