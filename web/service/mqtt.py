@@ -142,7 +142,8 @@ class MqttQueue(Service):
             printer_name=printer_name,
             printer_index=self.printer_index,
         )
-        self._ha.start()
+        # HomeAssistantService.__init__ calls reload_config() which calls start()
+        # when enabled, so no explicit start() call is needed here.
         self._printer_name = printer_name or "AnkerMake M5"
         self._printer_sn = printer_sn
 

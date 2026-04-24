@@ -134,11 +134,7 @@ class HomeAssistantService:
             self.stop()
             self.start()
         elif self._enabled and not self._client:
-            # If enabled and not running, start? 
-            # MqttQueue calls start() explicitly.
-            # But if we are called at runtime (API update), we might need to start it.
-            # We'll assume if it was meant to be running, start it.
-            pass
+            self.start()
 
     @property
     def enabled(self):
@@ -182,16 +178,16 @@ class HomeAssistantService:
         self._client.will_set(avail_topic, payload="offline", qos=1, retain=True)
 
         try:
-            # connect_async() stores params without doing network I/O.
-            # loop_start() spins up paho's background thread which performs
-            # the initial connect and any subsequent reconnect attempts.
             self._client.connect_async(self._host, self._port, keepalive=60)
-        except (ValueError, OSError) as err:
-            # Raised only for invalid host/port syntax, not for transient
-            # unreachability. Treat as a genuine misconfiguration.
+        except ValueError as err:
+            # Invalid host/port syntax — genuine misconfiguration.
             log.error(f"HA MQTT: invalid broker configuration: {err}")
             self._client = None
             return
+        except OSError as err:
+            # Broker unreachable right now (ConnectionRefused, NetworkUnreachable, etc.).
+            # Log a warning but proceed to loop_start() so paho retries automatically.
+            log.warning(f"HA MQTT: initial connect failed ({err}), will retry via background loop")
 
         self._client.loop_start()
 
