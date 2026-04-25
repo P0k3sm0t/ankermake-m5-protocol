@@ -193,6 +193,7 @@ class MqttQueue(Service):
             app.config["insecure"]
         )
         self._reset_print_state()
+        self._ha.start()
         self._ha.update_state(mqtt_connected=True)
         self._last_query = 0
         self._timelapse_start_prompt_window_until = (

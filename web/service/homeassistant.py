@@ -155,6 +155,8 @@ class HomeAssistantService:
         """
         if not self._enabled:
             return
+        if self._client:
+            return
 
         log.info(f"HA MQTT: connecting to {self._host}:{self._port}")
         if hasattr(paho_mqtt, "CallbackAPIVersion"):

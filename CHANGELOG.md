@@ -67,6 +67,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.8] - 2026-04-25
+
+### Fixed
+ - HA MQTT: service no longer stays disconnected after a printer-MQTT reconnect — `worker_start()` now calls `ha.start()` so the HA broker connection is re-established whenever the printer MQTT session restarts
+ - HA MQTT: `start()` is now a no-op when a client is already running, preventing accidental double-start from external callers
+
 ## [1.10.7] - 2026-04-24
 
 ### Fixed
