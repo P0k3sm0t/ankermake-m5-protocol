@@ -779,14 +779,19 @@ def webserver(env):
 @pass_env
 def webserver_run(env, host, port):
     import web
+    kwargs = {
+        "pppp_dump": env.pppp_dump,
+    }
+    if env.mqtt_ca_cert is not None:
+        kwargs["mqtt_ca_cert"] = env.mqtt_ca_cert
+
     web.webserver(
         env.config,
         env.printer_index,
         host,
         port,
         env.insecure,
-        pppp_dump=env.pppp_dump,
-        mqtt_ca_cert=env.mqtt_ca_cert,
+        **kwargs,
     )
 
 

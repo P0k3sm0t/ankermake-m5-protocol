@@ -268,6 +268,49 @@ def test_http_calc_sec_code_and_webserver_run_dispatch(monkeypatch):
     ]
 
 
+def test_webserver_run_forwards_mqtt_ca_cert_when_configured(monkeypatch, tmp_path):
+    runner = CliRunner()
+    fake_config = FakeConfigManager()
+    webserver_calls = []
+    ca_cert = tmp_path / "ca-cert.pem"
+    ca_cert.write_text("test-ca")
+
+    monkeypatch.setattr("ankerctl.cli.config.configmgr", lambda: fake_config)
+    monkeypatch.setattr("ankerctl.cli.logfmt.setup_logging", lambda level, log_dir=None: None)
+    monkeypatch.setattr("ankerctl.Environment.upgrade_config_if_needed", lambda self: None)
+    monkeypatch.setattr("ankerctl.Environment.load_config", lambda self, required=True: None)
+    monkeypatch.setattr(
+        "web.webserver",
+        lambda config, printer_index, host, port, insecure, **kwargs: webserver_calls.append(
+            (config, printer_index, host, port, insecure, kwargs)
+        ),
+    )
+
+    result = runner.invoke(
+        ankerctl.main,
+        [
+            "--mqtt-ca-cert",
+            str(ca_cert),
+            "--pppp-dump",
+            "trace.log",
+            "webserver",
+            "run",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert webserver_calls == [
+        (
+            fake_config,
+            0,
+            "127.0.0.1",
+            4470,
+            False,
+            {"pppp_dump": "trace.log", "mqtt_ca_cert": str(ca_cert)},
+        )
+    ]
+
+
 def test_config_password_commands_validate_generate_and_remove(monkeypatch):
     runner = CliRunner()
     fake_config = FakeConfigManager()
