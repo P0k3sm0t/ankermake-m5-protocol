@@ -20,3 +20,7 @@ dump/
 *.log
 SECURITY_AUDIT_REPORT.json
 TEST_COVERAGE_ANALYSIS.md
+
+# Offline MQTT broker — generated certs (run offline/setup-certs.sh to regenerate)
+offline/mosquitto/certs/*.pem
+offline/mosquitto/certs/*.srl
