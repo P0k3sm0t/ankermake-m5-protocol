@@ -8,6 +8,7 @@ from libflagship.util import unhex, enhex
 
 DEFAULT_UPLOAD_RATE_MBPS = 10
 UPLOAD_RATE_MBPS_CHOICES = (5, 10, 25, 50, 100)
+MQTT_CA_CERT_ENVVAR = "ANKERCTL_MQTT_CA_CERT"
 
 
 def default_apprise_config():
@@ -93,6 +94,11 @@ def default_camera_config():
     return {
         "per_printer": {},
     }
+
+
+def default_mqtt_ca_cert():
+    value = os.getenv(MQTT_CA_CERT_ENVVAR)
+    return value or None
 
 
 def merge_dict_defaults(data, defaults):

@@ -93,6 +93,7 @@ HOME_MOVE_ZERO_VALUE_BY_AXIS = {
 
 
 import cli.mqtt
+import cli.model
 from ..notifications import AppriseNotifier, format_duration
 from .history import PrintHistory
 from .timelapse import TimelapseService
@@ -187,10 +188,12 @@ class MqttQueue(Service):
         self._gcode_layer_count = count
 
     def worker_start(self):
+        mqtt_ca_cert = app.config.get("mqtt_ca_cert") or cli.model.default_mqtt_ca_cert()
         self.client = cli.mqtt.mqtt_open(
             app.config["config"],
             self.printer_index,
-            app.config["insecure"]
+            app.config["insecure"],
+            mqtt_ca_cert,
         )
         self._reset_print_state()
         self._ha.start()

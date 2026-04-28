@@ -5,9 +5,9 @@ import copy
 log = logging.getLogger("cli.mqtt")
 
 
+import cli.model
 import cli.util
 
-from libflagship import ROOT_DIR
 from libflagship.mqtt import MqttMsgType
 from libflagship.mqttapi import AnkerMQTTBaseClient
 
@@ -23,7 +23,8 @@ FILE_LIST_SOURCE_VALUES = {
 }
 
 
-def mqtt_open(config, printer_index, insecure):
+def mqtt_open(config, printer_index, insecure, mqtt_ca_cert=None):
+    mqtt_ca_cert = mqtt_ca_cert or cli.model.default_mqtt_ca_cert()
 
     with config.open() as cfg:
         if printer_index < 0 or printer_index >= len(cfg.printers):
@@ -37,7 +38,7 @@ def mqtt_open(config, printer_index, insecure):
             acct.mqtt_username,
             acct.mqtt_password,
             printer.mqtt_key,
-            ca_certs=ROOT_DIR / "ssl/ankermake-mqtt.crt",
+            ca_cert=mqtt_ca_cert,
             verify=not insecure,
         )
         client.connect(server)

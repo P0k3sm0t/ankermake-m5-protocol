@@ -46,7 +46,7 @@ def mqtt_topic_direction(topic):
 
 class Environment:
     def __init__(self):
-        pass
+        self.mqtt_ca_cert = cli.model.default_mqtt_ca_cert()
 
     def load_config(self, required=True):
         with self.config.open() as config:
@@ -77,11 +77,18 @@ pass_env = click.make_pass_decorator(Environment)
 @click.option("--pppp-dump", required=False, metavar="<file.log>", type=click.Path(),
               help="Enable logging of PPPP data to <file.log>")
 @click.option("--insecure", "-k", is_flag=True, help="Disable TLS certificate validation")
+@click.option(
+    "--mqtt-ca-cert",
+    envvar=cli.model.MQTT_CA_CERT_ENVVAR,
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to CA certificate for local MQTT broker TLS verification",
+)
 @click.option("--verbose", "-v", count=True, help="Increase verbosity")
 @click.option("--quiet", "-q", count=True, help="Decrease verbosity")
 @click.option("--printer", "-p", type=click.IntRange(min=0), default=environ.get('PRINTER_INDEX') or 0, help="Select printer number")
 @click.pass_context
-def main(ctx, pppp_dump, verbose, quiet, insecure, printer):
+def main(ctx, pppp_dump, insecure, mqtt_ca_cert, verbose, quiet, printer):
     ctx.ensure_object(Environment)
     env = ctx.obj
     levels = {
@@ -93,8 +100,12 @@ def main(ctx, pppp_dump, verbose, quiet, insecure, printer):
     }
     env.config   = cli.config.configmgr()
     env.insecure = insecure
+    env.mqtt_ca_cert = mqtt_ca_cert
     env.level = max(-3, min(verbose - quiet, 1))
     env.pppp_dump = pppp_dump
+
+    if env.mqtt_ca_cert is not None:
+        environ[cli.model.MQTT_CA_CERT_ENVVAR] = env.mqtt_ca_cert
     
     import os
     log_dir = environ.get("ANKERCTL_LOG_DIR", "/logs" if os.path.isdir("/logs") else None)
@@ -138,7 +149,7 @@ def mqtt_monitor(env, command_topics, sniff_topics):
     Connect to mqtt broker, and show low-level events in realtime.
     """
 
-    client = cli.mqtt.mqtt_open(env.config, env.printer_index, env.insecure)
+    client = cli.mqtt.mqtt_open(env.config, env.printer_index, env.insecure, env.mqtt_ca_cert)
     if command_topics or sniff_topics:
         extra_topics = client.subscribe_device_topics(wildcard=sniff_topics)
         for topic in extra_topics:
@@ -195,7 +206,7 @@ def mqtt_send(env, command_type, args, force):
             log.fatal("Sending DEVICE_NAME_SET without devName=<name> will crash printer (override with --force)")
             raise SystemExit(1)
 
-    client = cli.mqtt.mqtt_open(env.config, env.printer_index, env.insecure)
+    client = cli.mqtt.mqtt_open(env.config, env.printer_index, env.insecure, env.mqtt_ca_cert)
     cli.mqtt.mqtt_command(client, cmd)
 
 
@@ -249,7 +260,7 @@ def mqtt_file_list_probe(env, source, source_value, timeout, window):
         f"collecting replies for up to {timeout:.1f}s + {window:.1f}s window."
     )
 
-    client = cli.mqtt.mqtt_open(env.config, env.printer_index, env.insecure)
+    client = cli.mqtt.mqtt_open(env.config, env.printer_index, env.insecure, env.mqtt_ca_cert)
     result = cli.mqtt.mqtt_file_list_probe(
         client,
         source=source,
@@ -273,7 +284,7 @@ def mqtt_rename_printer(env, newname):
     Set a new nickname for your printer
     """
 
-    client = cli.mqtt.mqtt_open(env.config, env.printer_index, env.insecure)
+    client = cli.mqtt.mqtt_open(env.config, env.printer_index, env.insecure, env.mqtt_ca_cert)
 
     cmd = {
         "commandType": MqttMsgType.ZZ_MQTT_CMD_DEVICE_NAME_SET,
@@ -306,7 +317,7 @@ def mqtt_gcode_dump(env, gcode, window, drain):
 
       ankerctl.py mqtt gcode-dump "M420 V" --drain 3
     """
-    client = cli.mqtt.mqtt_open(env.config, env.printer_index, env.insecure)
+    client = cli.mqtt.mqtt_open(env.config, env.printer_index, env.insecure, env.mqtt_ca_cert)
 
     all_data = []
 
@@ -347,7 +358,7 @@ def mqtt_gcode(env):
 
     Press Ctrl-C to exit. (or Ctrl-D to close connection, except on Windows)
     """
-    client = cli.mqtt.mqtt_open(env.config, env.printer_index, env.insecure)
+    client = cli.mqtt.mqtt_open(env.config, env.printer_index, env.insecure, env.mqtt_ca_cert)
 
     while True:
         gcode = click.prompt("gcode", prompt_suffix="> ")
@@ -768,7 +779,15 @@ def webserver(env):
 @pass_env
 def webserver_run(env, host, port):
     import web
-    web.webserver(env.config, env.printer_index, host, port, env.insecure, pppp_dump=env.pppp_dump)
+    web.webserver(
+        env.config,
+        env.printer_index,
+        host,
+        port,
+        env.insecure,
+        pppp_dump=env.pppp_dump,
+        mqtt_ca_cert=env.mqtt_ca_cert,
+    )
 
 
 if __name__ == "__main__":

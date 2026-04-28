@@ -6,6 +6,7 @@ import json
 import uuid
 from datetime import datetime, timedelta
 
+from libflagship import ROOT_DIR
 from libflagship.mqtt import MqttMsg, MqttPktType
 
 
@@ -71,10 +72,19 @@ class AnkerMQTTBaseClient:
         pass
 
     @classmethod
-    def login(cls, printersn, username, password, key, ca_certs=None, verify=True):
+    def login(cls, printersn, username, password, key, ca_certs=None, verify=True, ca_cert=None):
         client = mqtt.Client()
-        cert_reqs = ssl.CERT_NONE if not verify else ssl.VERIFY_DEFAULT
-        client.tls_set(ca_certs=ca_certs, cert_reqs=cert_reqs)
+        if ca_cert is None:
+            ca_cert = ca_certs
+
+        if verify:
+            if ca_cert is None:
+                ca_cert = ROOT_DIR / "ssl/ankermake-mqtt.crt"
+            context = ssl.create_default_context(cafile=str(ca_cert))
+            client.tls_set_context(context)
+        else:
+            client.tls_set(cert_reqs=ssl.CERT_NONE)
+
         client.tls_insecure_set(not verify)
         client.username_pw_set(username, password)
 
