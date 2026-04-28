@@ -13,7 +13,9 @@ dump/
 .env.*
 !.env.example
 .claude/
+.claude-backup-20260324-132505/
 .claude-flow/
+.codex
 .swarm/
 .mcp.json
 .venv/
