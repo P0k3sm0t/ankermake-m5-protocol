@@ -67,6 +67,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.9] - 2026-05-02
+
+### Added
+ - `--mqtt-ca-cert` CLI flag and `ANKERCTL_MQTT_CA_CERT` env var for custom CA certificate pinning — allows connecting to a self-signed MQTT broker (e.g. local Mosquitto) without disabling all TLS verification via `-k`
+ - Offline operation stack: `docker-compose_offline.yaml` with self-hosted Mosquitto broker as drop-in replacement for Anker's cloud MQTT; includes cert setup script and `documentation/offline-feasibility.md`
+
+### Fixed
+ - Webserver did not forward the custom MQTT CA cert path to the MQTT service (CI regression introduced in previous commit)
+
+### Changed
+ - HA addon `config.yaml` version is now bumped automatically by CI on each release — no more manual version drift
+
 ## [1.10.8] - 2026-04-25
 
 ### Fixed
